@@ -1,0 +1,15 @@
+# 全仓库统一用 LF，禁止 Git 在 clone 时改写成 CRLF。
+# 原因：DELIVERY.md 里 74 条 sha256 是按 LF 文件算的；别人在 Windows 上
+# clone 出来一旦变成 CRLF，字节就变了，manifest 校验对不上。
+* text=auto eol=lf
+
+# 二进制产物不参与换行符转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.bin binary

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>炸金花 · M3/M5 正式 UI（Canvas）</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: #0b1015; color: #eef4ef; font-family: "Cascadia Mono", "Consolas", "Noto Sans Mono CJK SC", monospace; }
+      /* 竖向预算：画布要拿到 ≥560 高才不触发"窗口太小"（工单 §4 rev=7 的验收窗口是 720×640）。
+         所以页面自身的框架必须压到 ~80px 以内：控制条走"紧凑两行"，容器内边距 2px，绝不写死 calc(100vh - N)。
+         M5 加了联机控件，靠"两种模式各藏一半"把行数顶回去：单机那五个不联机的看不见，反之亦然。 */
+      header { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 4px 10px; background: #141d26; border-bottom: 1px solid #24313d; font-size: 12px; }
+      header h1 { font-size: 13px; margin: 0 8px 0 0; font-weight: 700; }
+      header label { color: #9fb3a8; display: flex; gap: 4px; align-items: center; }
+      header select, header input { background: #0f1720; color: #eef4ef; border: 1px solid #2b3a48; border-radius: 4px; padding: 1px 4px; font: inherit; }
+      header input { width: 6.5em; }
+      #netUrl { width: 15em; }
+      #netName { width: 7em; }
+      header button { background: #2f6f4f; color: #eaf5ee; border: 1px solid #7fd6a8; border-radius: 5px; padding: 2px 10px; font: inherit; cursor: pointer; }
+      #hint { margin-left: auto; color: #8fa398; }
+      /* 成组显隐：display:contents 让 label 仍然直接排在 header 这条 flex 里，收起时整组变 none */
+      .solo-only, .online-only { display: contents; }
+      body.mode-solo .online-only { display: none; }
+      body.mode-online .solo-only { display: none; }
+      #stage { flex: 1 1 auto; min-height: 0; padding: 2px; display: flex; }
+      #board { width: 100%; height: 100%; display: block; background: #10161d; border: 1px solid #24313d; border-radius: 8px; }
+      .muted { color: #8fa398; }
+    </style>
+  </head>
+  <body class="mode-solo">
+    <header>
+      <h1>炸金花 · M3</h1>
+      <label>模式 <select id="mode"><option value="solo" selected>单机</option><option value="online">联机</option></select></label>
+      <span class="solo-only">
+        <label>机器人 <select id="bots"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select></label>
+        <label>牌型 <select id="preset"><option value="classic" selected>classic</option><option value="a23off">a23off</option></select></label>
+        <label>庄家 <select id="dealerNext"><option value="rotate" selected>轮庄</option><option value="winner">赢家坐庄</option><option value="loser">输家坐庄</option></select></label>
+        <label>种子 <input id="seed" type="number" value="20260925" /></label>
+        <button id="newGame">开新一桌</button>
+      </span>
+      <span class="online-only">
+        <label>房间 <input id="netUrl" type="text" placeholder="ws://127.0.0.1:8790" /></label>
+        <label>名字 <input id="netName" type="text" placeholder="玩家" /></label>
+        <button id="netBtn">连接</button>
+      </span>
+      <label>买入 <input id="buyIn" type="number" value="256" min="1" /></label>
+      <span id="hint" class="muted">未开局</span>
+    </header>
+    <div id="stage">
+      <canvas id="board"></canvas>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

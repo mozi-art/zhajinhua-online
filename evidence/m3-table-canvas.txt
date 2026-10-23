@@ -1,0 +1,83 @@
+M3 · 拟物牌桌（Vite + Canvas）真浏览器实测原文
+  零依赖通道：http://127.0.0.1:8133/webui/index.html（Node 内置静态服务，2 机器人 / 买入 256 / 种子 20260925 / classic / 轮庄）
+  构建通道：npm run build:ui → vite v8.3.1 building client environment for production（输出见末尾）
+
+采集方式：in-app Browser + evaluate_script。所有状态推进都走页面上真实存在的按钮与 window.__zjh3 的"发意图"通道
+（click 与点按钮是同一条 dispatch → act → 引擎路径）；布局与绘制用真实 Canvas2D 上下文实测。
+本轮同样没拿到截图：页面处于不可见表面（visibilityState=hidden → NATIVE_BROWSER_VIEWPORT_UNAVAILABLE），
+不为凑图强行切前台。像素级观感归用户终审（监督方复审班用 ≥720×640 真鼠标点）。
+
+------------------------------------------------------------
+[1] 内嵌面板视口 492×466 < 最小视口 560×560 ⇒ 走"提示路径"（不留可点区，不装作能玩）
+
+  liveCanvasCss: [492, 466]
+  提示文案：窗口太小（需要至少 560×560），当前 492×466
+  hits（可点区）：0
+
+  → 工单 §4 M3 已裁定：560×560 维持不降，不为内嵌测试面板妥协设计。
+
+------------------------------------------------------------
+[2] 同一份代码在 960×620 下画出牌桌（离屏 canvas + 页面真实的 scene/paint 模块，非 mock）
+
+  scenePrimitives: 54     ellipses: 2（木色外轨 + 绿呢台面）
+  texts: 30               hits: 8（合法 5 / 灰 3）
+  中央文字：["池 6"]
+  座位板 rect 数：4（3 个座位 + 顶栏同色）
+  牌背 rect 数：9 = 3 家 × 3 张，全背
+
+  调色板实际落点数（每 4 像素采样一次）：
+    深底 13,17,22     : 69245
+    木轨 91,58,34     :  1631
+    绿呢 20,86,58     :  5897
+    座位板 24,34,44   : 10407
+    牌背 43,79,143    :  1080
+    合法钮 47,111,79  : 29971
+  → 椭圆台面、木轨、绿呢、牌背、绿钮都在真实 Canvas2D 上画出来了，不是只有图元列表。
+
+------------------------------------------------------------
+[3] 开局未看牌：三家全隐藏，且"已看牌的机器人"照样对真人藏着（rev=4/5 口径在 M3 里成立）
+
+  #001 deal      你 → 电脑1 出 3 @注级1｜ante=1 seats=3 first=1
+  #002 look      电脑1 @注级1｜闷→明        ← 机器人主动买信息（§4 M2/M3 的看牌决策）
+  #003 call      电脑1 出 2 @注级1｜seen×stake ← 转明之后付明价
+  #004 call      电脑2 出 1 @注级1｜dark×stake
+
+  座位快照：
+    你    hidden=true  looked=false cards="···"
+    电脑1 hidden=true  looked=true  cards="···"   ← 它自己是明牌，但真人看不见 ⇒ 看牌只放开本人
+    电脑2 hidden=true  looked=false cards="···"
+
+------------------------------------------------------------
+[4] 在 M3 里真打完整一局（真人一律跟注，4 次点击、0 次被拒）
+
+  phase = settled，桌上总额 768 守恒，三家筹码 252 / 264 / 252
+  结算面板（bridge 结构化 → scene 中央覆盖块，5 行）：
+    结束原因：同一注级下各家各完成 3 次行动 → 强制开牌
+    你[你]｜Q♠ 3♥ 7♦ 单张｜没赢（现筹码 252）
+    电脑1[电脑]｜5♠ T♣ 5♥ 对子｜赢 15（现筹码 264）
+    电脑2[电脑]｜J♦ T♠ 2♥ 单张｜没赢（现筹码 252）
+    指纹 7642888e45cfcb8c
+  此时台面上亮出的牌面图元 = 9 张（3 家 × 3 张）
+    → 强制开牌 ⇒ revealed 对所有人放行，与"没看过牌"是两回事（project/12 钉的就是这条）
+  结算后合法按钮 = ["再来一局", "整桌重来"]（整桌重来此刻确实是合法项，不再是谎报的灰按钮）
+
+  同一局面在两次独立加载（一次纯 bridge 驱动、一次本页面驱动）下指纹同为 7642888e45cfcb8c
+    ⇒ 状态推进与渲染层无关，回放确定性成立。
+
+------------------------------------------------------------
+[5] Vite 构建（工单 §4 M3 + Q3 裁定 A：vite 仅 devDependencies）
+
+  $ npm run build:ui
+  vite v8.3.1 building client environment for production...
+  ✓ 17 modules transformed.
+  webui/dist/index.html                 2.27 kB │ gzip:  1.14 kB
+  webui/dist/assets/index-C6WNM_5a.js  38.54 kB │ gzip: 14.07 kB
+  ✓ built in 70ms
+
+  package.json：dependencies = {}，devDependencies = {@types/node, typescript, vite@^8.3.1}
+  npm test 仍是 node test/run.ts（不经过 vite）；webui/dist/ 属构建产物，不入交付清单。
+
+------------------------------------------------------------
+控制台：仅 1 条与页面逻辑无关的警告，由我自己的 getImageData 探针触发
+  （Canvas2D: Multiple readback operations using getImageData are faster with willReadFrequently）
+页面自身报错：0

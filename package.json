@@ -1,0 +1,23 @@
+{
+  "name": "zjh",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "炸金花 M0：牌型判定 + 规则配置（零运行时依赖）",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node test/run.ts",
+    "typecheck": "tsc --noEmit",
+    "room": "node netx/serve.ts",
+    "dev:ui": "vite",
+    "build:ui": "vite build",
+    "preview:ui": "vite preview"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}

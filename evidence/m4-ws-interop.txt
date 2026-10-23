@@ -1,0 +1,52 @@
+# M4 · 联机互操作的第一手转写（不是断言，是给复审看的现场记录）
+#
+# 怎么产生的：进程内起一个真房间（netx/ws.ts + 手写 RFC6455），端口 0 取临时端口；
+#   四个客户端全部用 Node 24 内置的全局 WebSocket（undici 实现）经 TCP 回环打进来 —— 对端不是我自己写的客户端。
+#   脚本内容 = 每条连接一个"收→喂给 netx/client.ts 会话→回发份额→轮到自己就行动"的循环，走完整手牌后收尾。
+#   工装脚本随交付删除；同一件事的可断言版本是 test/netx-ws.test.ts（ws/01…ws/04）。
+# 要点：
+#   1) 服务端承诺一定排在各家 nonce 之前（下行序列里 commit 先于本家交份额）；
+#   2) 丙/丁是在第一局发牌之后才连上的 ⇒ 本局不参与发牌，它们自己的牌面全程 unknown，
+#      但仍收到公开投影，并且照样能核对揭示（catchup 会补发承诺）；
+#   3) 四家各自独立复算出同一颗种子 = 多方份额合成的那颗（3907236537），且违规列表为空；
+#   4) 结算后 pot=0、四笔买入总额守恒（1024）、fault=null。
+#
+# Node v24.19.0；全局 WebSocket = function；seats=4，买入 256，turnMs=600s（全程不靠超时），settleMs=80ms
+# 握手核对：SHA-1("dGhlIHNhbXBsZSBub25jZQ==" + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11") = s3pPLMBiTxaQ9kYGzzhZRbK+xOo=（RFC 6455 §1.3 公开向量）
+
+## 甲 → 座位 0
+下行类型序列：hello notice notice commit collect notice notice commit collect commit collect view patch patch patch patch patch patch patch patch patch reveal
+局号=1 seq=11 阶段=settled 累积日志=11 条 违规=[] 揭示核对=1
+我自己的牌（结算后可见）：[{"rank":9,"suit":1},{"rank":6,"suit":2},{"rank":5,"suit":2}]
+别家牌面：1=已亮牌
+重连凭据 token 前 8 位：e1cc412b…（各家不同；断线后凭它 resume）
+
+## 乙 → 座位 1
+下行类型序列：hello notice commit collect notice notice commit collect commit collect view patch patch patch patch patch patch patch patch patch reveal
+局号=1 seq=11 阶段=settled 累积日志=11 条 违规=[] 揭示核对=1
+我自己的牌（结算后可见）：[{"rank":4,"suit":1},{"rank":9,"suit":0},{"rank":14,"suit":1}]
+别家牌面：0=已亮牌
+重连凭据 token 前 8 位：a4b49e35…（各家不同；断线后凭它 resume）
+
+## 丙 → 座位 2
+下行类型序列：hello commit collect notice notice commit collect commit collect view patch patch patch patch patch patch patch patch patch reveal
+局号=1 seq=11 阶段=settled 累积日志=11 条 违规=[] 揭示核对=1
+我自己的牌（结算后可见）："unknown"
+别家牌面：0=已亮牌 1=已亮牌
+重连凭据 token 前 8 位：325aefe7…（各家不同；断线后凭它 resume）
+
+## 丁 → 座位 3
+下行类型序列：hello commit collect notice commit collect commit collect view patch patch patch patch patch patch patch patch patch reveal
+局号=1 seq=11 阶段=settled 累积日志=11 条 违规=[] 揭示核对=1
+我自己的牌（结算后可见）："unknown"
+别家牌面：0=已亮牌 1=已亮牌
+重连凭据 token 前 8 位：f4024323…（各家不同；断线后凭它 resume）
+
+## GET /health（关闭前）
+{"protocol":"zjh-m4-1","hand":1,"phase":"settled","seated":[0,1],"connections":4,"over":null,"fault":null}
+
+## 服务端侧对账
+各家筹码：0=249 1=263 2=256 3=256；总额 1024（四笔买入合计 1024）
+phase=settled hand=1 pot=0 stake=1 fault=null stateHash=8e44d9dc5bab04ce
+各家自行复算的种子：甲=3907236537 乙=3907236537 丙=3907236537 丁=3907236537
+到手的承诺方（核对揭示时要拿它比对）：甲=server 乙=server 丙=server 丁=server

@@ -1,0 +1,164 @@
+# M5 真浏览器实测记录（rev=10）
+
+执行者：qoder（实现方自跑，非监督方终审）
+命令面：
+- 房间进程：`node netx/serve.ts 8790`（一条命令起；页面与 ws 同端口）
+- 健康检查：`curl -s http://127.0.0.1:8790/health`
+- 页面：`http://127.0.0.1:8790/webui/index.html`（内嵌浏览器，1 个标签页）
+- 对面那一家：`node .scratch/r10-peer.ts ws://127.0.0.1:8790 乙`
+  —— 它是**真 socket + 同一个 `netx/client.ts`**（与页面里那份同一文件），策略=轮到我就先亮牌再跟注
+- 无头替身：`node test/run.ts`（本文件所有断言的可重跑版本见 TEST-OUTPUT.md §10）
+
+## 1. 房间起来的样子
+
+```
+炸金花房间 · ws ws://127.0.0.1:8790 · 页面 http://127.0.0.1:8790/ · 健康检查 http://127.0.0.1:8790/health
+子协议 "zjh-m4-1"，座位 6 个，最低买入 256。Ctrl+C 停；或输一行 quit 回车。
+```
+
+`/health`（两家都在座、第 14 手行动中）：
+
+```
+{"protocol":"zjh-m4-1","hand":14,"phase":"betting","seated":[0,1],"connections":2,"over":null,"fault":null}
+```
+
+## 2. 页面入桌（甲，拿到座位 1）
+
+- 模式切到"联机"后 `#netUrl` 里预填的就是 `ws://127.0.0.1:8790`（默认值来自 `netx/serve.ts::DEFAULT_ROOM_PORT`，由 srv/05 机检两处一致）
+- 提示条：`联机·已连接（甲）` → 开第一手后 `联机·在线（甲）｜第 N 手·已结算`
+- 第 1 手结算后页面读到：`0|乙|remote|A♥ 8♦ Q♠|chips=249`、`1|甲|human|9♠ K♠ 7♠|chips=263`，`total=512`
+
+## 3. 第 8 手：看牌 + 加注 + 比牌 + 结算面板（验收① 的实质内容）
+
+页面日志尾部（原文）：
+
+```
+#008 call      乙 出 4 @注级2｜seen×stake
+#009 compare   甲 → 乙 出 4 @注级2｜开牌 cmp=1 loser=0
+#010 terminal  — 出 20 @注级2｜oneLeft:1
+#011 settle    — 出 20 @注级2｜oneLeft:1:remainder=-1
+```
+
+结算面板（页面 `snapshot().settlement` 原文）：
+
+```
+结束原因：其他人都不在了 → 不开牌通吃
+乙[玩家]｜J♠ A♥ T♣ 单张｜没赢（现筹码 166）
+甲[你]｜J♣ 2♣ 6♣ 同花｜赢 20（现筹码 346）
+本局序号 11｜揭示核对 通过
+```
+
+同一时刻 `revealedLine = 亮牌：乙 JS AH TC / 甲 JC 2C 6C`、`ledgerLine = 乙=166 甲=346`、`total = 512`、
+`netInfo().verifiedHand = 8`、`trustLines = []`。
+
+对面那一家（独立进程、独立视角）同期记录：
+
+```
+HAND 8 seat=0 verified=7 chips=0:166,1:346 violations=[]
+```
+两边数字逐字对得上（166/346，和 512）。
+
+## 4. A2 的价格显示与 reject 显示（真页面上）
+
+轮到甲、注级 1 时按钮条原文：
+
+```
+看牌|legal=true
+跟注（出 1）|legal=true
+加注（出 2）|legal=true
+弃牌|legal=true
+比牌 → 乙（出 2）|legal=true
+```
+
+按"加注"而注级已到顶 ⇒ 页面显示的是**服务端送回来的原话**（不是本地判的）：
+
+```
+note = 服务端拒绝：stake 16 cannot double within max 16
+netInfo().lastReject.code = stake_at_max
+```
+
+注级 4 时同一按钮变成 `跟注（出 8）`，日志里那一笔就是 `#010 call 甲 出 8 @注级4`（两个来源、同一个数 ⇒ (a) 类断言在真页面上也成立）。
+
+## 5. 中途刷新重连（验收②）
+
+刷新前（第 9 手进行中）：`seat=1 hand=9 seq=5 ledger=乙=163 甲=344 total=512`。
+刷新后页面重新连上，`sessionStorage` 里那份 `zjh-m5:session` 让 `resumeWire() ?? joinWire()` 走了 resume：
+
+```
+seat=1（没被换到别的座）  hand=11  seq=3  link=open
+ledger=乙=169 甲=339  total=512  trustLines=[]  errors=[]  staleToken=false
+log 首行 = #001 deal 甲 → 乙 出 2 @注级1｜ante=1 seats=2 first=0（本局日志整段补回来了）
+```
+
+## 6. 注入伪造下行（验收③）
+
+在页面控制台把一条**第二次承诺**灌进那道墙（走的就是 `socket.onmessage` 那条路径）：
+
+```json
+{"t":"commit","hand":12,"party":"server","commit":"ffff…64 个 f"}
+```
+
+页面反应（四处同时，没有一处只活在测试里）：
+
+```
+提示条      ⚠ 这一局不可信：server re-committed a different value for party server in hand 12 ⏎ 已停手：本页面不再向服务端发出任何行动
+警告位 note ⚠ 这一局不可信：…
+日志首两行  ⚠ 这一局不可信：… / 已停手：本页面不再向服务端发出任何行动
+按钮条      已停手：这一局不可信|legal=false        ← 整条按钮塌成一条灰说明
+再点跟注    没发出去：peer flagged the server: server re-committed a different value …
+```
+
+`untrusted=true`、座位与台账不受影响（`total=512`）。
+
+## 7. 这一轮浏览器实测逼出来的四个缺陷（都已修 + 已钉用例）
+
+| # | 缺陷 | 表现 | 修法 | 钉住它的用例 |
+|---|---|---|---|---|
+| 1 | 静态服务不认识 `netx/` 里那四个可移植模块 | `webui/netplay.ts → ../netx/client.ts` 被 403 ⇒ **整张模块图加载失败**，画布 0 高、`__zjh3` 不存在，页面只在控制台报错 | `webmin/serve.ts` 增加"文件名白名单"`netx/{client,protocol,seed,sha256}.ts`；房间/传输/进程入口三个文件继续拒 | nui/17（遍历页面 import 图逐个过 `resolveStatic`）、srv/01（四个给、四个拒） |
+| 2 | 凭据作废后页面停在"已连接、零下行" | 房间重启 ⇒ 旧 token 的 `resume` 被 `bad_token` 拒 ⇒ 页面既不回落 join 也不显示原因 | `netplay.onText` 认出 `bad_token`/`token_seat_mismatch` ⇒ 清存储 + `staleToken` 提示；`main.ts` 收到即改发 `joinWire()`；`persist()` 在作废期间不许把旧凭据续命 | nui/18 |
+| 3 | `hand=0` 时 `resume()` 产出一条协议非法的上行 | 新标签页刷新即抛 `invalid message at "hand"` | `client.ts::resume()` 在 `hand < 1` 时返回 null（上层因此自然走 join） | client/16 |
+| 4 | **房间进程被未捕获 TypeError 打死** | 庄家那一座没交份额 ⇒ `onNonceDeadline` 把它剔出本局 ⇒ `h.dealer` 不在 `seats` 里 ⇒ `startHand` 抛，抛出点在注入时钟的回调里 ⇒ 整个进程退出（实测 `/health` 此后不再应答） | `room.ts` 新增 `dealerAmong(seats, preferred)`：庄家不在席时按确定性规则挪到还在桌的第一家（beginHand 的同一条兜底也改为共用它）；并在日志里对每家说一句 | room/29 |
+
+另有一条**不是缺陷**的设计确认：内嵌浏览器窗口 531×559，画布拿不到 `MIN_VIEWPORT = 560×560`，
+`webui/scene.ts` 按 rev=7 的裁定走"窗口太小"提示路径 ⇒ `scene.hits` 为空、真鼠标坐标点击无法进行。
+本环境也截不了图（面板 hidden）。所以**验收① 的"真鼠标点两整手"仍归监督方在 ≥720×640 下做**；
+上面第 3–4 节走的是页面自己的 `send()` 路径（与画布点击同一个函数），坐标数学由 ui3 的 hitAt 用例与 nui/01 在无头侧钉着。
+
+## 7. 补记：把"凭据作废后自动重入桌"改成 netplay 产出之后，真浏览器再验一遍
+
+改设计的原因（不是为测试而改）：原先"发什么"的分支写在 `webui/main.ts` 的 `onmessage` 里，那条只能靠文本形状的门去钉，
+形如一扇虚门（变异 E02 就这么逃过一次）。现在 `netplay.onText` 自己产出那条全新的 join，`main.ts` 退化成纯管道，
+于是它能被 `nui/18` 在无头侧钉住（含"同一个错误只自动重入桌一次"的闩锁）。
+
+重演步骤（同一个标签页，sessionStorage 活着）：
+
+1. 清存储 → 连上房间 A → 页面 `seat=0`，存储里留下 A 给的凭据；
+2. 杀掉 A，起一间全新的房间 B（B 不认识 A 的 token）；
+3. 页面自己重连（`onclose ⇒ 退避重连`），把旧凭据拿去 `resume`。
+
+页面侧读数：
+
+```
+netInfo().errors    = ["bad_token"]        ← 服务端确实拒了这份旧凭据
+netInfo().staleToken= false                ← 补发的 join 已经拿到新的 hello，提示不再挂着
+netInfo().seat      = 0                    ← 座位是 B 给的
+netInfo().hasToken  = true                 ← 新凭据已写回每标签页存储
+hint                = 联机·已连接（甲）
+```
+
+房间侧读数：`{"protocol":"zjh-m4-1","hand":0,"phase":"idle","seated":[],"connections":1,"fault":null}`
+⇒ `connections:1` 就是"这座归本房间所有"（`seated` 只有在开局后才有内容，这台房间一个人，还没到 `players.min=2`）。
+
+## 8. 关于第 5、6 节里"页面已连接却零下行"的那段判读修正
+
+那一段的**现象是真的**（我据此修了三处：静态服务放行面、`hand=0` 的非法 resume、`renew()` 丢份额），
+但把它整体归因给"页面缺一条回落"是错的。真凶是这个内嵌浏览器面板处于 `visibilityState=hidden`：
+Chrome 把隐藏页的 `setTimeout` 钳到 ≥1s，我那些"等一等再读"的探针因此超时、读数落在两次事件之间，
+看起来就像"连上了但什么都没收到"。同一批 WebSocket 事件在不依赖 sleep 的短调用里全部正常到达（第 7 节）。
+
+顺带两条同样是真、也同样是这个环境造成的判读错误，记在这里免得复审再踩：
+
+- `take_screenshot` 直接报 `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE ... visibilityState=hidden` —— 本环境的截图证据拿不到，
+  不是我漏了截图步骤；
+- 画布 `526×484 < MIN_VIEWPORT 560×560` ⇒ `scene` 按 rev=7 的裁定走"窗口太小"路径、`scene.hits` 为空 ⇒
+  真鼠标坐标点击在本环境无法进行，这条仍归监督方在 ≥720×640 下做（工单 §4 M5 验收①）。

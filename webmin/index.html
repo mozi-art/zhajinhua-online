@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>炸金花 · M1.5 最小可玩版</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { font-family: system-ui, "Microsoft YaHei", sans-serif; background: #16211b; color: #e8e8e8; margin: 18px; }
+      h1 { font-size: 17px; margin: 0 0 12px; }
+      h2 { font-size: 13px; margin: 16px 0 6px; color: #ffd27a; letter-spacing: .04em; }
+      section { border: 1px solid #2f4a3a; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; background: #1a2721; }
+      table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+      th, td { border-bottom: 1px solid #2f4a3a; padding: 4px 6px; text-align: left; font-size: 13px; }
+      th { color: #9fb8a8; font-weight: normal; }
+      tr.me { background: #223d2d; }
+      tr.dead td { color: #7d8b83; text-decoration: line-through; }
+      button, select, input { font: inherit; padding: 5px 9px; margin: 3px 6px 3px 0; background: #24382e; color: #e8e8e8; border: 1px solid #4a6b57; border-radius: 4px; }
+      button:disabled { opacity: .38; }
+      button.hinted { border-color: #ffd27a; }
+      pre { margin: 0; white-space: pre-wrap; font-size: 12.5px; line-height: 1.5; max-height: 260px; overflow: auto; }
+      .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .kv { font-size: 14px; }
+      .bad { color: #ff8f8f; }
+      .good { color: #9fe0b0; }
+      .muted { color: #8fa398; }
+    </style>
+  </head>
+  <body>
+    <h1>炸金花 · M1.5 最小可玩版（1 真人 + 电脑占位机器人）</h1>
+
+    <section id="setup">
+      <div class="row">
+        <label>机器人 <select id="bots"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select></label>
+        <label>每人买入 <input id="buyIn" type="number" value="256" min="1" style="width:6em"></label>
+        <label>牌型口径 <select id="preset"><option value="classic" selected>classic（A23 最小顺）</option><option value="a23off">a23off</option></select></label>
+        <label>庄家规则 <select id="dealerNext"><option value="rotate" selected>轮庄</option><option value="winner">赢家坐庄</option><option value="loser">输家坐庄</option></select></label>
+        <label>种子基数 <input id="seed" type="number" value="20260925" style="width:9em"></label>
+        <button id="newSession">开新一桌</button>
+        <span class="muted">同一种子 ⇒ 同一牌序，可复算</span>
+      </div>
+    </section>
+
+    <section>
+      <div id="status" class="kv">点"开新一桌"开始。</div>
+      <div id="ledger" class="kv muted"></div>
+    </section>
+
+    <section>
+      <h2>座位</h2>
+      <table id="seats"><thead><tr><th>座位</th><th>筹码</th><th>本局投入</th><th>闷/明</th><th>状态</th><th>牌</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section>
+      <h2>你的行动</h2>
+      <div class="row" id="actions"></div>
+
+      <div id="note" class="kv"></div>
+    </section>
+
+    <section>
+      <h2>结算</h2>
+      <pre id="settlement" class="muted">（本局未结束）</pre>
+    </section>
+
+    <section>
+      <h2>行动日志</h2>
+      <pre id="log" class="muted">（无）</pre>
+    </section>
+
+    <section>
+      <h2>机器状态（自动化用）</h2>
+      <pre id="machine"></pre>
+    </section>
+
+    <script type="module" src="./app.ts"></script>
+  </body>
+</html>
