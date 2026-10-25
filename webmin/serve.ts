@@ -27,6 +27,11 @@ const MIME: Record<string, string> = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
 };
 
 export type Resolved =
@@ -79,6 +84,11 @@ export function resolveStatic(requestUrl: string): Resolved {
   const ext = extname(abs).toLowerCase();
   const mime = MIME[ext];
   if (mime === undefined) return { ok: false, status: 403, why: `refused extension ${ext || '(none)'}` };
+  // 图片只许从 webui/assets/ 出（webui 氛围层的素材）：webmin / src 下出现图片仍然拒绝，
+  // ui/13 钉的 /webmin/x.png 防线原样成立 —— 放行面按"目录 + 扩展名"双重收窄。
+  if (['.png', '.jpg', '.jpeg', '.webp', '.svg'].includes(ext) && !rel2.startsWith('webui/assets/')) {
+    return { ok: false, status: 403, why: 'images are only served from webui/assets/' };
+  }
   return { ok: true, abs, mime, needsStrip: ext === '.ts' };
 }
 

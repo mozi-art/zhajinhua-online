@@ -13,9 +13,13 @@ import type { Snapshot } from './bridge.ts';
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
+// 渐变以"数据"进 scene（色标数组），paint 负责材质化 —— scene 保持纯函数可断言，
+// paint 保持零写死颜色（ui3/29 扫描）。radial = 椭圆内径向；缺省 = 竖向线性。
+export type Grad = { stops: [number, string][]; radial?: boolean };
+
 export type Primitive =
-  | { kind: 'rect'; rect: Rect; fill: string; stroke: string | null; radius: number }
-  | { kind: 'ellipse'; cx: number; cy: number; rx: number; ry: number; fill: string; stroke: string | null }
+  | { kind: 'rect'; rect: Rect; fill: string; stroke: string | null; radius: number; tilt?: number }
+  | { kind: 'ellipse'; cx: number; cy: number; rx: number; ry: number; fill: string | null; stroke: string | null; grad?: Grad }
   | { kind: 'text'; x: number; y: number; text: string; size: number; color: string; bold: boolean; align: 'left' | 'center' | 'right' }
   | { kind: 'line'; x1: number; y1: number; x2: number; y2: number; color: string };
 
@@ -76,6 +80,51 @@ export const TABLE_STYLE: Style = {
   rowH: 18,
 };
 
+// 墨金：暗墨纸面 + 金 accent。只换色不换布局 —— Style 是布局之外的全部观感，
+// 换主题 = 给 buildScene 换一个常量（main.ts 负责循环与持久化，scene 不碰存储）。
+export const INK_STYLE: Style = {
+  bg: '#0d0c0a',
+  felt: '#26200f',
+  feltEdge: '#171307',
+  rail: '#4a3a20',
+  panel: '#171410',
+  panelSoft: '#211c14',
+  fg: '#efe9dc',
+  dim: '#a89f8d',
+  accent: '#d9a441',
+  legal: '#44603a',
+  illegal: '#2a2620',
+  warn: '#a04a3a',
+  cardFace: '#f4efe4',
+  cardBack: '#31415f',
+  cardRed: '#c04a35',
+  font: TABLE_STYLE.font,
+  pad: 14,
+  rowH: 18,
+};
+
+// 月白：浅色纸面 + 朱砂 accent。给亮环境与投屏演示用；对比度按 fg/dim 全部重调过。
+export const PAPER_STYLE: Style = {
+  bg: '#efe9dc',
+  felt: '#e7ddc4',
+  feltEdge: '#d3c5a2',
+  rail: '#b09a6a',
+  panel: '#f6f1e6',
+  panelSoft: '#ece4d2',
+  fg: '#2a2620',
+  dim: '#6f6754',
+  accent: '#b8432f',
+  legal: '#5c7f5c',
+  illegal: '#cfc6b2',
+  warn: '#a04a3a',
+  cardFace: '#fffdf6',
+  cardBack: '#8a94a8',
+  cardRed: '#b8432f',
+  font: TABLE_STYLE.font,
+  pad: 14,
+  rowH: 18,
+};
+
 // 低于这个视口不做布局，只画一条提示 —— 与其把东西叠在一起装作"能玩"，不如明确说不行。
 export const MIN_VIEWPORT = { w: 560, h: 560 };
 
@@ -88,12 +137,35 @@ function redSuit(suit: string): boolean {
   return suit === '♥' || suit === '♦';
 }
 
+// —— 颜色混合助手（纯函数）：3D 拟物的明暗都从主题色推导，不引入新调色板 ——
+function hexParts(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  const v = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+// t > 0 向白靠，t < 0 向黑靠（t ∈ [-1,1]）
+function shade(hex: string, t: number): string {
+  const [r, g, b] = hexParts(hex);
+  const to = t >= 0 ? 255 : 0;
+  const k = Math.abs(t);
+  const f = (v: number): number => Math.round(v + (to - v) * k);
+  return `#${[f(r), f(g), f(b)].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+function withAlpha(hex: string, a: number): string {
+  const [r, g, b] = hexParts(hex);
+  return `rgba(${String(r)},${String(g)},${String(b)},${String(a)})`;
+}
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
+
 const PAD = 8; // 座位板内边距
+const AVATAR = 26; // 头像圆环直径（程序化：首字母 + 双环，无外部素材）
 const OWN_LABELS = 168; // 本人板：说明文字占左侧一栏，牌放右边（省下的竖向高度是 6 人桌的救命钱）
 const TOP_TEXT = 34; // 对手板：两行说明占顶部这条带，牌从这条带下面开始
 const CAPTION = 12; // 对手板：牌下面那行（牌型 / ···）
 
-export const OPP_PLATE = { w: CARD.pitch * 2 + CARD.w + PAD * 2, h: TOP_TEXT + CARD.h + CAPTION }; // 124 × 110
+export const OPP_PLATE = { w: CARD.pitch * 2 + CARD.w + PAD * 2, h: TOP_TEXT + CARD.h + CAPTION }; // 124 × 110（头像只上本人板：124 是 560 视口 6 家桌的活口）
 export const OWN_PLATE = { w: OWN_LABELS + OWN_CARD.pitch * 2 + OWN_CARD.w + PAD, h: OWN_CARD.h + PAD * 2 }; // 352 × 94
 const BAND_GAP = 4;
 const TOP_BAR = 32;
@@ -101,7 +173,13 @@ const BTN_H = 28;
 const MIN_BTN_W = 112;
 
 // 翻牌动画：since = 该座位牌面首次可见的时刻（由调用方计时），duration = 一次翻牌用时。
-export type Anim = { now: number; since: Record<number, number>; duration: number };
+// 发牌动画：deal.start = 本局发牌起始时刻；每张牌按"环座位 × 3 张"的确定次序错峰起飞，
+// 落定后与不带 deal 的布局逐字节相同（ui3/28 钉住两端与中途的泄露面）。
+// 筹码动画：chips = 某座位刚下注的 {seat, since, count}；新筹码从座位板弧线飞向桌前筹码堆，
+// 飞行中额外画、落定后不画（堆里本来就有它们）⇒ 两端与不带 chips 逐字节一致（ui3/32）。
+export type DealAnim = { start: number; duration: number; stagger: number };
+export type ChipAnim = { seat: number; since: number; count: number };
+export type Anim = { now: number; since: Record<number, number>; duration: number; deal?: DealAnim; chips?: ChipAnim };
 
 export const IDLE_ANIM: Anim = { now: 0, since: {}, duration: 320 };
 
@@ -112,6 +190,16 @@ export const IDLE_ANIM: Anim = { now: 0, since: {}, duration: 320 };
 // 玩家拿它判断"这局值不值得跟"，而它与重连后看到的账本对不上。
 // 导出给用例钉"文案 ↔ departed 过滤"这一对：只改文案或只改过滤，nst/12 与 nui/22 会各红一条。
 export const TOTAL_LABEL = '在场筹码+池';
+
+// 桌前筹码堆：1 枚筹码 = 1 个当前注级（口径声明在 ui3/32）。
+// committed 里混着底注与明牌加倍等成分，用"当前注级"折算是唯一的统一单位；
+// 封顶 8 枚是视觉口径（超过部分不再堆高，数字仍以座位板「投入」为准）。
+export const CHIP = { rx: 11, ry: 5.5, max: 8, gap: 4 };
+
+export function chipStackCount(committed: number, stake: number): number {
+  if (committed <= 0 || stake <= 0) return 0;
+  return Math.max(1, Math.min(CHIP.max, Math.round(committed / stake)));
+}
 
 function text(x: number, y: number, t: string, st: Style, opt?: { size?: number; color?: string; bold?: boolean; align?: 'left' | 'center' | 'right' }): Primitive {
   return {
@@ -215,22 +303,38 @@ export function ringNeed(seatCount: number): number {
   return OPP_PLATE.h + mid + BAND_GAP + OWN_PLATE.h;
 }
 
-// 座位板落位：0 号位固定给真人（最下方），其余按快照序填顶部横排；顶部超过两枚就改两侧各一枚。
+// 座位板落位：0 号位固定给真人（最下方）。对手按雀魂式角位：
+// 1 位 = 正上；2 位（默认 3 人桌）= 左上 / 右上两角；3 位 = 左上 / 正上 / 右上；
+// 4 位以上 = 顶排均分 + 两侧各一枚（既有算法）。ui3/19 在全部人数 × 四档视口守护不重叠。
 function placePlates(seatCount: number, ring: Rect): Rect[] {
   const out: Rect[] = [{ x: ring.x + (ring.w - OWN_PLATE.w) / 2, y: ring.y + ring.h - OWN_PLATE.h, w: OWN_PLATE.w, h: OWN_PLATE.h }];
   const m = seatCount - 1;
   if (m <= 0) return out;
-  const sides = m >= 4 ? 2 : 0;
+  const opp = (x: number): Rect => ({ x, y: ring.y, w: OPP_PLATE.w, h: OPP_PLATE.h });
+  if (m === 1) {
+    out.push(opp(ring.x + (ring.w - OPP_PLATE.w) / 2));
+    return out;
+  }
+  if (m === 2) {
+    out.push(opp(ring.x));
+    out.push(opp(ring.x + ring.w - OPP_PLATE.w));
+    return out;
+  }
+  if (m === 3) {
+    out.push(opp(ring.x));
+    out.push(opp(ring.x + (ring.w - OPP_PLATE.w) / 2));
+    out.push(opp(ring.x + ring.w - OPP_PLATE.w));
+    return out;
+  }
+  const sides = 2;
   const top = m - sides;
   for (let k = 0; k < top; k += 1) {
     const cx = ring.x + (ring.w * (k + 1)) / (top + 1);
     out.push({ x: cx - OPP_PLATE.w / 2, y: ring.y, w: OPP_PLATE.w, h: OPP_PLATE.h });
   }
   const midY = ring.y + OPP_PLATE.h + BAND_GAP;
-  if (sides === 2) {
-    out.push({ x: ring.x, y: midY, w: OPP_PLATE.w, h: OPP_PLATE.h });
-    out.push({ x: ring.x + ring.w - OPP_PLATE.w, y: midY, w: OPP_PLATE.w, h: OPP_PLATE.h });
-  }
+  out.push({ x: ring.x, y: midY, w: OPP_PLATE.w, h: OPP_PLATE.h });
+  out.push({ x: ring.x + ring.w - OPP_PLATE.w, y: midY, w: OPP_PLATE.w, h: OPP_PLATE.h });
   return out;
 }
 
@@ -244,7 +348,9 @@ function buttonGrid(count: number, w: number, st: Style): { cols: number; rows: 
   return { cols, rows, btnW: (inner - st.pad * (cols - 1)) / cols, barH: rows * (BTN_H + st.pad) };
 }
 
-export function buildScene(snap: Snapshot, width: number, height: number, st: Style = TABLE_STYLE, anim: Anim = IDLE_ANIM): Scene {
+// 悬停入参：坐标由调用方（main.ts 的 mousemove）给出，scene 只负责"在命中按钮上叠一块高亮"。
+// 纯入参：不传（或 null）时输出与没有这个参数完全一致 —— 这条由 ui3/25 逐字节钉住。
+export function buildScene(snap: Snapshot, width: number, height: number, st: Style = TABLE_STYLE, anim: Anim = IDLE_ANIM, hover?: { x: number; y: number } | null): Scene {
   const w = Math.max(240, Math.floor(width));
   const h = Math.max(240, Math.floor(height));
   if (w < MIN_VIEWPORT.w || h < MIN_VIEWPORT.h) {
@@ -288,15 +394,54 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
   primitives.push({ kind: 'rect', rect: { x: 0, y: 0, w, h: TOP_BAR }, fill: st.panel, stroke: null, radius: 0 });
   primitives.push(text(st.pad, 21, snap.status, st, { size: statusSize, bold: true }));
 
-  // 牌桌：外轨 + 绿呢台面。座位板压在边轨上（台面先画），所以台面比座位环的内空更大一点。
+  // 牌桌：3D 拟物 —— 落影 → 木轨（竖向渐变受光）→ 呢面（径向渐变）→ 内圈亮线 → 中央光池。
+  // 椭圆几何与旧版完全同参（只是填充从平色换成数据化渐变），顶栏净空约束（ui3/21）原样成立。
   // 但椭圆绝不能顶穿顶栏 —— 顶栏那行状态是模型拼好的整句，被木轨盖住就等于丢信息（rev=7 实测踩过）。
   const cx = w / 2;
   const cy = ring.y + (ring.h - OWN_PLATE.h) / 2;
   const RAIL = 18;
-  const rx = Math.min(Math.max(120, ring.w / 2 - OPP_PLATE.w / 2 + 30), cx - RAIL);
+  const rxRaw = Math.min(Math.max(120, ring.w / 2 - OPP_PLATE.w / 2 + 30), cx - RAIL);
   const ry = Math.min(Math.max(60, (ring.h - OWN_PLATE.h) / 2 + 24), Math.max(40, cy - RAIL - TOP_BAR - 2), Math.max(40, stripTop - 2 - RAIL - cy));
-  primitives.push({ kind: 'ellipse', cx, cy, rx: rx + RAIL, ry: ry + RAIL, fill: st.rail, stroke: null });
-  primitives.push({ kind: 'ellipse', cx, cy, rx, ry, fill: st.felt, stroke: st.feltEdge });
+  // 圆桌观感：横纵比封顶（宽屏下不再被拉成细长椭圆），座位板本来就在桌沿之外
+  const rx = Math.min(rxRaw, Math.max(150, ry * 1.6));
+
+  // 透视地板（雀魂式）：向心透视线 + 两圈罗盘环，全部低透明度、从主题底色推导。
+  // 画在牌桌之前 ⇒ 中段被桌面盖住，露出的尾巴就是透视感；罗盘环几何受顶栏/底条净空约束（ui3/21）。
+  const floorCol = withAlpha(shade(st.bg, 0.32), 0.55);
+  const ringA = {
+    rx: Math.min(rx + RAIL + 30, cx - 8),
+    ry: Math.min(ry + RAIL + 30, cy - TOP_BAR - 2, stripTop - 2 - cy, h - cy - 8),
+  };
+  const ringB = {
+    rx: Math.min(ringA.rx + 38, cx - 6),
+    ry: Math.min(ringA.ry + 30, cy - TOP_BAR - 2, stripTop - 2 - cy, h - cy - 8),
+  };
+  primitives.push({ kind: 'ellipse', cx, cy, rx: ringA.rx, ry: ringA.ry, fill: 'transparent', stroke: floorCol });
+  primitives.push({ kind: 'ellipse', cx, cy, rx: ringB.rx, ry: ringB.ry, fill: 'transparent', stroke: withAlpha(shade(st.bg, 0.26), 0.4) });
+  for (const [fx, fy] of [[0, 0], [w, 0], [0, h], [w, h], [cx, 0], [cx, h], [0, cy], [w, cy]] as const) {
+    primitives.push({ kind: 'line', x1: fx, y1: fy, x2: cx, y2: cy, color: floorCol });
+  }
+
+  primitives.push({ kind: 'ellipse', cx, cy: cy + 7, rx: rx + RAIL, ry: ry + RAIL, fill: 'rgba(0,0,0,0.32)', stroke: null });
+  primitives.push({
+    kind: 'ellipse', cx, cy, rx: rx + RAIL, ry: ry + RAIL, fill: null, stroke: withAlpha(shade(st.rail, 0.5), 0.35),
+    grad: { stops: [[0, shade(st.rail, 0.3)], [0.55, st.rail], [1, shade(st.rail, -0.42)]] },
+  });
+  primitives.push({
+    kind: 'ellipse', cx, cy, rx, ry, fill: null, stroke: st.feltEdge,
+    grad: { stops: [[0, shade(st.felt, 0.16)], [0.55, st.felt], [1, st.feltEdge]], radial: true },
+  });
+  primitives.push({ kind: 'ellipse', cx, cy, rx: rx - 1.5, ry: ry - 1.5, fill: 'transparent', stroke: withAlpha(shade(st.felt, 0.5), 0.4) });
+  primitives.push({
+    kind: 'ellipse', cx, cy, rx: rx * 0.52, ry: ry * 0.52, fill: null, stroke: null,
+    grad: { stops: [[0, withAlpha(shade(st.felt, 0.35), 0.4)], [1, withAlpha(shade(st.felt, 0.35), 0)]], radial: true },
+  });
+  // 中央台座（雀魂式计分台）：托住池/注级的深色圆角台，几何全部从 cx/cy/rx 推导
+  const podW = Math.min(210, Math.max(120, rx * 0.92));
+  const podH = 64;
+  primitives.push({ kind: 'rect', rect: { x: cx - podW / 2 + 2, y: cy - podH / 2 + 5, w: podW, h: podH }, fill: 'rgba(0,0,0,0.30)', stroke: null, radius: 14 });
+  primitives.push({ kind: 'rect', rect: { x: cx - podW / 2, y: cy - podH / 2, w: podW, h: podH }, fill: shade(st.panel, -0.25), stroke: withAlpha(st.accent, 0.35), radius: 14 });
+  primitives.push({ kind: 'rect', rect: { x: cx - podW / 2 + 4, y: cy - podH / 2 + 4, w: podW - 8, h: podH - 8 }, fill: 'transparent', stroke: withAlpha(shade(st.panel, 0.3), 0.5), radius: 11 });
   primitives.push(text(cx, cy - 12, `池 ${String(snap.pot)}`, st, { size: 18, bold: true, color: st.accent, align: 'center' }));
   primitives.push(text(cx, cy + 8, `注级 ${String(snap.stake)}`, st, { size: 13, color: st.dim, align: 'center' }));
 
@@ -320,6 +465,60 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     }
   }
 
+  // 桌前筹码堆 + 飞行筹码（雀魂式"自己桌前"的筹码区）：堆位在座位板朝桌心一侧
+  //（自己的那堆在板与桌面之间），枚数 = chipStackCount(投入, 注级)。
+  // 飞行中的新筹码只在 0<t<1 画 —— 落定后堆里本来就有它们 ⇒ 两端与不带 chips 逐字节一致。
+  for (let i = 0; i < snap.seats.length; i += 1) {
+    const seat = snap.seats[i] as SeatCell;
+    const slot = (i - humanIndex + n) % n;
+    const own = slot === 0;
+    const box = (plates[slot] ?? plates[0]) as Rect;
+    const count = chipStackCount(seat.committed, snap.stake);
+    const fly = anim.chips !== undefined && anim.chips.seat === seat.seat ? anim.chips : undefined;
+    if (count === 0 && fly === undefined) continue;
+    const dirX = cx - (box.x + box.w / 2);
+    const dirY = cy - (box.y + box.h / 2);
+    const dLen = Math.hypot(dirX, dirY) || 1;
+    const ux = dirX / dLen;
+    const uy = dirY / dLen;
+    const tEdgeX = ux !== 0 ? box.w / 2 / Math.abs(ux) : Infinity;
+    const tEdgeY = uy !== 0 ? box.h / 2 / Math.abs(uy) : Infinity;
+    const tEdge = Math.min(tEdgeX, tEdgeY);
+    const baseX = box.x + box.w / 2 + ux * (tEdge + 16);
+    const baseY = box.y + box.h / 2 + uy * (tEdge + 16);
+    for (let j = 0; j < count; j += 1) {
+      const col = j % 2 === 0 ? st.accent : st.cardRed;
+      const jx = (((j * 31) % 5) - 2) * 0.8;
+      primitives.push({
+        kind: 'ellipse',
+        cx: baseX + jx,
+        cy: baseY - j * CHIP.gap,
+        rx: CHIP.rx,
+        ry: CHIP.ry,
+        fill: j % 2 === 0 ? shade(col, 0.15) : col,
+        stroke: withAlpha(shade(col, -0.4), 0.9),
+      });
+    }
+    if (fly !== undefined) {
+      const toX = baseX;
+      const toY = baseY - count * CHIP.gap;
+      for (let f = 0; f < fly.count; f += 1) {
+        const raw = (anim.now - fly.since - f * 60) / 420;
+        if (raw <= 0 || raw >= 1) continue;
+        const e = easeOutCubic(raw);
+        primitives.push({
+          kind: 'ellipse',
+          cx: box.x + box.w / 2 + (toX - (box.x + box.w / 2)) * e,
+          cy: box.y + box.h / 2 + (toY - (box.y + box.h / 2)) * e - Math.sin(e * Math.PI) * 16,
+          rx: CHIP.rx,
+          ry: CHIP.ry,
+          fill: shade(st.accent, 0.15),
+          stroke: withAlpha(shade(st.accent, -0.4), 0.9),
+        });
+      }
+    }
+  }
+
   // 结算块占底部条：行数 = 摘要 + 一行台账；与座位板、牌面、按钮永不共面
   const panel: Rect | null = settle.length > 0 ? { x: st.pad, y: stripTop, w: w - st.pad * 2, h: stripLines * st.rowH + 22 } : null;
 
@@ -331,31 +530,70 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const box = (plates[slot] ?? plates[0]) as Rect;
     const c = own ? OWN_CARD : CARD;
     const isTurn = snap.turn === seat.seat && snap.phase === 'betting';
+    primitives.push({ kind: 'rect', rect: { x: box.x + 2, y: box.y + 3, w: box.w, h: box.h }, fill: 'rgba(0,0,0,0.22)', stroke: null, radius: 8 });
     primitives.push({ kind: 'rect', rect: box, fill: seat.departed ? st.panelSoft : st.panel, stroke: isTurn ? st.accent : st.dim, radius: 8 });
 
     const cardX = own ? box.x + OWN_LABELS : box.x + PAD;
     const cardY = own ? box.y + PAD : box.y + TOP_TEXT;
-    const labelX = box.x + PAD;
+    const labelX = own ? box.x + PAD + AVATAR + 6 : box.x + PAD;
     // role 三档：human=本标签页的我、bot=单机占位机器人、remote=联机桌上别的真人。
     // 联机桌上把别人标成 bot 会印出"[电脑]"，那是错的（M5 加的就是这一档）。
     const who = seat.role === 'human' ? '[你]' : seat.role === 'bot' ? '[电脑]' : '[玩家]';
     const head = `${seat.marks}${seat.name}${who} ${seat.departed ? '离桌' : seat.looked ? '明' : '闷'}`;
-    const labelRoom = (own ? OWN_LABELS : box.w) - PAD * 2 - 4;
+    const labelRoom = (own ? OWN_LABELS - AVATAR - 6 : box.w) - PAD * 2 - 4;
+    // 头像圆环只上本人板（对手板 124 宽是 6 人桌窄视口的活口，对手的身份感来自角位与名牌）。
+    // 首字母用 accent 色：ui3/24 以"居中+前景色"圈出亮牌行，头像字必须避开这条判定；
+    // 首字母若恰好是牌面字符（联机玩家名不可控）则回退 '#'，不给防泄漏扫描（ui3/11）添假阳性。
+    if (own) {
+      const avCx = box.x + PAD + AVATAR / 2;
+      const avCy = box.y + 40;
+      const initial = seat.name.slice(0, 1);
+      const glyph = /^[2-9TJQKA♠♥♣♦]$/.test(initial) ? '#' : initial;
+      primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2, ry: AVATAR / 2, fill: shade(st.panelSoft, 0.12), stroke: isTurn ? st.accent : withAlpha(st.dim, 0.7) });
+      primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2 - 3, ry: AVATAR / 2 - 3, fill: 'transparent', stroke: withAlpha(shade(st.panelSoft, 0.4), 0.5) });
+      primitives.push(text(avCx, avCy + 4.5, glyph, st, { size: 12, bold: true, color: st.accent, align: 'center' }));
+    }
     primitives.push(text(labelX, box.y + (own ? 16 : 14), head, st, { size: fitSize(head, labelRoom, own ? 15 : 13), bold: true, color: seat.departed ? st.dim : st.fg }));
     const chipsLine = `筹码 ${String(seat.chips)} · 投入 ${String(seat.committed)}`;
     primitives.push(text(labelX, box.y + (own ? 34 : 28), chipsLine, st, { size: fitSize(chipsLine, labelRoom, own ? 13 : 11), color: st.dim }));
     if (own) primitives.push(text(labelX, box.y + 52, seat.status, st, { size: fitSize(seat.status, labelRoom, 13), color: st.dim }));
 
-    // 三张牌位：翻牌进度 < 0.5 时只许画牌背，绝不提前露牌面
+    // 三张牌位：翻牌进度 < 0.5 时只许画牌背，绝不提前露牌面。
+    // 发牌飞行（anim.deal）：次序 = 环座位逐张（slot*1/轮 k*n+slot），从桌面中心（牌堆位）
+    // easeOutCubic 飞向落位，途中带确定性倾斜；t≥1 时走完全相同的静态路径 ⇒ 两端逐字节一致。
     const open = flipProgress(anim, seat.seat) >= 0.5;
     const faceUp = !seat.hidden && open;
     for (let k = 0; k < 3; k += 1) {
+      const finalX = cardX + k * c.pitch;
+      let px = finalX;
+      let py = cardY;
+      let tilt: number | undefined;
+      if (anim.deal !== undefined) {
+        const idx = k * n + slot;
+        const raw = (anim.now - anim.deal.start - idx * anim.deal.stagger) / anim.deal.duration;
+        const t = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
+        if (t < 1) {
+          const e = easeOutCubic(t);
+          const fx = finalX + c.w / 2;
+          const fy = cardY + c.h / 2;
+          const sx = ((idx * 53) % 9 - 4) * 1.4;
+          const sy = ((idx * 29) % 7 - 3) * 1.1;
+          const fromX = cx + sx;
+          const fromY = cy + sy;
+          px = fromX + (fx - fromX) * e - c.w / 2;
+          py = fromY + (fy - fromY) * e - c.h / 2;
+          tilt = ((idx % 2 === 0 ? 1 : -1) * (8 + ((idx * 7) % 10))) * (1 - e);
+        }
+      }
+      // 牌影：每张牌右下 2/3px 的一块半透明矩形，读起来"浮在台面上"
+      primitives.push({ kind: 'rect', rect: { x: px + 2, y: py + 3, w: c.w, h: c.h }, fill: 'rgba(0,0,0,0.16)', stroke: null, radius: 6 });
       primitives.push({
         kind: 'rect',
-        rect: { x: cardX + k * c.pitch, y: cardY, w: c.w, h: c.h },
+        rect: { x: px, y: py, w: c.w, h: c.h },
         fill: faceUp ? st.cardFace : st.cardBack,
         stroke: faceUp ? st.dim : '#8fa398',
         radius: 6,
+        ...(tilt !== undefined ? { tilt } : {}),
       });
     }
     // 结果/牌型那行：本人放在左侧说明栏的第四行（牌下面会压到牌面），别家放在牌的正下方
@@ -453,6 +691,18 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
         }),
       );
     });
+  }
+
+  // 悬停高亮：追加在全部按钮图元之后（画在最上层），几何与命中区完全同 rect。
+  // 命中判定与 hitAt 同口径（边界算在区内），只是就地内联 —— scene 不自己 import 自己。
+  if (hover !== undefined && hover !== null) {
+    for (const hit of hits) {
+      const r = hit.rect;
+      if (hover.x >= r.x && hover.x <= r.x + r.w && hover.y >= r.y && hover.y <= r.y + r.h) {
+        primitives.push({ kind: 'rect', rect: r, fill: 'transparent', stroke: st.accent, radius: 5 });
+        break;
+      }
+    }
   }
 
   return {

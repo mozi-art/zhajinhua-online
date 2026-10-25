@@ -7,7 +7,7 @@ import { test, note } from './harness.ts';
 import { stateHash } from '../src/engine/state.ts';
 import { EMPTY_UI, dispatch, drain, snapshot, start } from '../webui/bridge.ts';
 import type { Snapshot, StartOptions } from '../webui/bridge.ts';
-import { buildScene, hitAt, TABLE_STYLE } from '../webui/scene.ts';
+import { buildScene, chipStackCount, hitAt, INK_STYLE, PAPER_STYLE, TABLE_STYLE } from '../webui/scene.ts';
 import type { Hit, Rect } from '../webui/scene.ts';
 import { paint } from '../webui/paint.ts';
 import { act, createSession, handText, intentOptions } from '../webmin/model.ts';
@@ -349,6 +349,11 @@ test('ui3/12 paint 只执行图元：假 ctx 下调用次数与图元数一一�
     save: () => ops.push('save'),
     restore: () => ops.push('restore'),
     setTransform: () => ops.push('setTransform'),
+    translate: () => ops.push('translate'),
+    rotate: () => ops.push('rotate'),
+    // 渐变材质化：paint 会拿一个 Gradient 对象逐色标 addColorStop —— 假 ctx 给个哑对象
+    createLinearGradient: () => ({ addColorStop: () => {} }),
+    createRadialGradient: () => ({ addColorStop: () => {} }),
     font: '',
     fillStyle: '',
     strokeStyle: '',
@@ -378,7 +383,7 @@ test('ui3/13 静态服务放行 webui（不装 vite 也跑得起），根路径�
   assert.equal(redirectTarget('/webui/'), '/webui/index.html');
   assert.equal(redirectTarget('/webui'), '/webui/index.html');
   assert.equal(redirectTarget('/'), '/webmin/index.html', '根路径不能悄悄换页面（rev=3–5 的复跑命令都指着它）');
-  for (const url of ['/webui/index.html', '/webui/main.ts', '/webui/bridge.ts', '/webui/scene.ts', '/webui/paint.ts', '/webmin/model.ts', '/src/engine/state.ts']) {
+  for (const url of ['/webui/index.html', '/webui/main.ts', '/webui/bridge.ts', '/webui/scene.ts', '/webui/paint.ts', '/webui/sfx.ts', '/webui/assets/felt-fabric.jpg', '/webmin/model.ts', '/src/engine/state.ts']) {
     assert.equal(resolveStatic(url).ok, true, `${url} 应当放行`);
   }
   for (const bad of ['/webui/../BRIEF.md', '/../BRIEF.md', '/BRIEF.md', '/webui/x.exe', '/webui/index.html.bak', '/test/run.ts']) {
@@ -811,4 +816,223 @@ test('lby/03 大厅数据面：等待中/进行中标签 + 自动刷新，都来
   assert.ok(ts.includes('setInterval'), '大厅要自动刷新（新开出的桌不该要求手动刷新）');
   assert.ok(ts.includes("visibilityState === 'visible'"), '页面不可见时不刷（省无谓请求）');
   note('lby/03 大厅：waiting 标签 + 5 秒自动刷新（可见时）');
+});
+
+// ---------------- 第一批：悬停 / 主题 / 页面接线 ----------------
+
+test('ui3/34 hover 是纯入参：不传与现状逐字节相同；命中按钮只多一块高亮且几何不变', () => {
+  const s = snapshot(opened());
+  const base = buildScene(s, 960, 620, TABLE_STYLE);
+  // 缺省、显式 undefined、显式 null 三种"没有悬停"的形态都必须与现状完全一致
+  assert.equal(JSON.stringify(base), JSON.stringify(buildScene(s, 960, 620, TABLE_STYLE, undefined, undefined)));
+  assert.equal(JSON.stringify(base), JSON.stringify(buildScene(s, 960, 620, TABLE_STYLE, undefined, null)));
+  const hit = base.hits[0];
+  assert.ok(hit !== undefined, '构造前提：至少有一颗按钮');
+  if (hit === undefined) return;
+  const hovered = buildScene(s, 960, 620, TABLE_STYLE, undefined, { x: hit.rect.x + hit.rect.w / 2, y: hit.rect.y + hit.rect.h / 2 });
+  assert.equal(hovered.primitives.length, base.primitives.length + 1, '命中按钮时应当恰好多一块高亮图元');
+  const extra = hovered.primitives[hovered.primitives.length - 1];
+  assert.ok(extra !== undefined && extra.kind === 'rect', '高亮必须是 rect 图元');
+  if (extra !== undefined && extra.kind === 'rect') {
+    assert.equal(extra.fill, 'transparent', '高亮只描边不填充');
+    assert.equal(extra.stroke, TABLE_STYLE.accent, '高亮用当前主题的 accent');
+    assert.deepEqual(extra.rect, hit.rect, '高亮必须 exactly 盖在命中按钮上');
+  }
+  // 命中区 / 座位板 / 底部条一概不变：hover 只加一块高亮，不动任何布局
+  assert.deepEqual(hovered.hits, base.hits);
+  assert.deepEqual(hovered.plates, base.plates);
+  assert.deepEqual(hovered.strip, base.strip);
+  // 悬停空白处（顶栏左上角，不是按钮）：与不传逐字节相同
+  const none = buildScene(s, 960, 620, TABLE_STYLE, undefined, { x: 2, y: 2 });
+  assert.equal(JSON.stringify(none), JSON.stringify(base), '悬停空白处的输出必须与缺省逐字节相同');
+  // 悬停另一颗按钮：高亮跟着换（不会一直停在第一颗上）
+  const hit2 = base.hits[1];
+  if (hit2 !== undefined) {
+    const hovered2 = buildScene(s, 960, 620, TABLE_STYLE, undefined, { x: hit2.rect.x + 2, y: hit2.rect.y + 2 });
+    const extra2 = hovered2.primitives[hovered2.primitives.length - 1];
+    assert.ok(extra2 !== undefined && extra2.kind === 'rect' && extra2.rect.x === hit2.rect.x && extra2.rect.y === hit2.rect.y, '高亮没有跟着第二颗按钮走');
+  }
+});
+
+test('ui3/35 主题常量：INK/PAPER 字段与 TABLE_STYLE 同构、取值确有差异，且默认主题没有被顺手改掉', () => {
+  const keys = Object.keys(TABLE_STYLE).sort();
+  for (const [name, st] of [['墨金', INK_STYLE], ['月白', PAPER_STYLE]] as const) {
+    assert.deepEqual(Object.keys(st).sort(), keys, `${name} 的字段集合与 TABLE_STYLE 不一致`);
+    const diff = keys.filter((k) => (st as unknown as Record<string, unknown>)[k] !== (TABLE_STYLE as unknown as Record<string, unknown>)[k]);
+    assert.ok(diff.length >= 5, `${name} 与 TABLE_STYLE 几乎相同（只有 ${String(diff.length)} 处不同）⇒ 换主题没有意义`);
+  }
+  // 布局量（pad/rowH/font）是布局契约的一部分：主题只许换色，不许顺手改布局
+  for (const st of [INK_STYLE, PAPER_STYLE]) {
+    assert.equal(st.pad, TABLE_STYLE.pad);
+    assert.equal(st.rowH, TABLE_STYLE.rowH);
+    assert.equal(st.font, TABLE_STYLE.font);
+  }
+  // 默认主题没被顺手改掉：buildScene 缺省仍等价于显式传 TABLE_STYLE
+  const s = snapshot(opened());
+  assert.equal(JSON.stringify(buildScene(s, 900, 600)), JSON.stringify(buildScene(s, 900, 600, TABLE_STYLE)));
+  // 换主题之后布局不变：同一快照在三种主题下的 hits/plates 必须完全一致
+  const table = buildScene(s, 900, 600, TABLE_STYLE);
+  const ink = buildScene(s, 900, 600, INK_STYLE);
+  const paper = buildScene(s, 900, 600, PAPER_STYLE);
+  assert.deepEqual(ink.hits, table.hits);
+  assert.deepEqual(ink.plates, table.plates);
+  assert.deepEqual(paper.hits, table.hits);
+  assert.deepEqual(paper.plates, table.plates);
+});
+
+test('ui3/36 页面接线：aria-live、语义键表与主题/音效/全屏三按钮', () => {
+  const html = stripped('webui/index.html');
+  const main = stripped('webui/main.ts');
+  // aria-live：读屏器的播报位必须存在，且入口层真的在喂它
+  assert.ok(html.includes('aria-live="polite"') && html.includes('id="live"'), 'index.html 缺 aria-live 播报位 #live');
+  assert.ok(main.includes("'live'"), 'main.ts 没有写 #live ⇒ 播报位是摆设');
+  // 三个新控件：HTML 有、main.ts 读了（与 ui3/04b 同一机检口径）
+  for (const id of ['themeBtn', 'muteBtn', 'fsBtn']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html 缺控件 #${id}`);
+    assert.ok(main.includes(`'${id}'`), `main.ts 没接 #${id} ⇒ 这个控件是摆设`);
+  }
+  // 语义键表：8 个 intent.kind 必须逐字出现在 main.ts 里（数字键按 kind 映射，不按下标）
+  for (const kind of ['look', 'call', 'raise', 'fold', 'compare', 'settle', 'nextHand', 'reset'] as const) {
+    assert.ok(main.includes(`'${kind}'`), `键盘语义键表缺 '${kind}'`);
+  }
+  // 全屏走按钮化的 requestFullscreen；音效走 sfx 模块（程序化合成，无素材文件）
+  assert.ok(main.includes('requestFullscreen'), '全屏必须走 requestFullscreen 按钮，不是 F 键');
+  assert.ok(main.includes('createSfx'), '音效模块没有接进入口层');
+  assert.ok(stripped('webui/sfx.ts').includes('OscillatorNode') || readFileSync(new URL('../webui/sfx.ts', import.meta.url), 'utf8').includes('createOscillator'), 'sfx 应当是程序化合成，不是音频文件');
+});
+
+// ---------------- 第二批：3D 桌面 / 发牌动画 / paint 颜色纪律 ----------------
+
+test('ui3/37 发牌动画：起飞前牌全在牌堆、途中无牌面泄露、落定后与静态布局逐字节一致', () => {
+  const snap = snapshot(opened({ bots: 2 }));
+  const W = 960;
+  const H = 620;
+  const start = 5000;
+  const seats = snap.seats.length;
+  const total = 70 * (seats * 3 - 1) + 260;
+  const staticScene = buildScene(snap, W, H, TABLE_STYLE);
+  // 牌堆位 = 桌面中心 = 台面椭圆的圆心（径向渐变椭圆中 rx 最大的那一个 = 呢面）
+  const ellipses = staticScene.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse');
+  const radial = ellipses.filter((p) => p.grad?.radial === true);
+  assert.ok(radial.length >= 1, '台面椭圆没找到');
+  const felt = radial.reduce((a, b) => (b.rx > a.rx ? b : a), radial[0] as (typeof radial)[number]);
+  assert.ok(felt !== undefined && felt.grad?.radial === true, '台面椭圆没找到');
+  if (felt === undefined) return;
+  const nearDeck = (r: Rect): boolean => Math.abs(r.x + r.w / 2 - felt.cx) < 60 && Math.abs(r.y + r.h / 2 - felt.cy) < 60;
+  const backsOf = (sc: ReturnType<typeof buildScene>): Rect[] =>
+    sc.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.cardBack).map((p) => p.rect);
+  // ① 起飞前（t=0）：所有牌背都聚在牌堆位，且整棵树没有任何牌面
+  const atDeck = buildScene(snap, W, H, TABLE_STYLE, { now: start, since: {}, duration: 320, deal: { start, duration: 260, stagger: 70 } });
+  const deckBacks = backsOf(atDeck);
+  assert.equal(deckBacks.length, seats * 3, `起飞前应有 ${String(seats * 3)} 张牌背，实际 ${String(deckBacks.length)}`);
+  for (const r of deckBacks) assert.ok(nearDeck(r), `起飞前的牌不在牌堆位 (${String(r.x)},${String(r.y)})`);
+  assert.equal(faceGlyphCount(atDeck), 0, '发牌途中就画出了牌面 ⇒ 提前泄露');
+  assert.equal(faceRects(atDeck).length, 0, '发牌途中出现了牌面矩形');
+  assert.notEqual(JSON.stringify(atDeck), JSON.stringify(staticScene), '发牌动画没有改变任何图元 ⇒ 动画根本没生效');
+  // ② 途中：有牌在飞（位置不同于静态）、无泄露、命中区与座位板纹丝不动、一切都在画布内
+  const mid = buildScene(snap, W, H, TABLE_STYLE, { now: start + Math.floor(total / 2), since: {}, duration: 320, deal: { start, duration: 260, stagger: 70 } });
+  assert.equal(faceGlyphCount(mid), 0, '飞行途中不许出现牌面');
+  const midBacks = backsOf(mid);
+  assert.ok(midBacks.some((r) => !nearDeck(r)), '飞到一半竟然没有一张牌离开牌堆');
+  for (const r of [...backsOf(mid), ...faceRects(mid)]) {
+    assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= W + 1 && r.y + r.h <= H + 1, `飞行中的牌飞出了画布 (${String(r.x)},${String(r.y)})`);
+  }
+  assert.deepEqual(mid.hits, staticScene.hits, '发牌动画不许动命中区');
+  assert.deepEqual(mid.plates, staticScene.plates, '发牌动画不许动座位板');
+  // ③ 纯函数：同一 anim 两次布局逐字节相同
+  const midAgain = buildScene(snap, W, H, TABLE_STYLE, { now: start + Math.floor(total / 2), since: {}, duration: 320, deal: { start, duration: 260, stagger: 70 } });
+  assert.equal(JSON.stringify(mid), JSON.stringify(midAgain));
+  // ④ 落定（t > 总时长）：与不带 deal 的静态布局逐字节一致 —— 绝不允许"永远卡在飞一半"
+  const landed = buildScene(snap, W, H, TABLE_STYLE, { now: start + total + 500, since: {}, duration: 320, deal: { start, duration: 260, stagger: 70 } });
+  assert.equal(JSON.stringify(landed), JSON.stringify(staticScene), '发牌落定后必须与静态布局逐字节一致');
+  // ⑤ 提前跳过（now 直接拨到终点之后）同样落定
+  const skipped = buildScene(snap, W, H, TABLE_STYLE, { now: start + total + 1, since: {}, duration: 320, deal: { start, duration: 260, stagger: 70 } });
+  assert.equal(JSON.stringify(skipped), JSON.stringify(staticScene));
+});
+
+test('ui3/38 paint 颜色纪律：一个十六进制色值都不写，颜色全部来自 scene 图元数据', () => {
+  const code = stripped('webui/paint.ts');
+  const hexes = code.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
+  assert.deepEqual(hexes, [], `paint.ts 里出现了写死的颜色：${hexes.join(' ')}`);
+  // 渐变必须由 paint 材质化（scene 只给色标数据），且真的在用 addColorStop
+  assert.ok(code.includes('addColorStop'), '渐变色标没有被材质化');
+  assert.ok(code.includes('createRadialGradient') || code.includes('createLinearGradient'), '渐变图元没有实现');
+  // 3D 桌面的渐变确实进了 scene：台面椭圆带 radial 色标、木轨带竖向线性色标
+  const sc = buildScene(snapshot(opened()), 960, 620, TABLE_STYLE);
+  const grads = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && p.grad !== undefined);
+  assert.ok(grads.length >= 2, `3D 桌面至少要两个渐变椭圆（木轨+呢面），实际 ${String(grads.length)}`);
+  assert.ok(grads.some((p) => p.grad?.radial === true), '呢面应当是径向渐变');
+  for (const p of grads) {
+    for (const [offset, color] of p.grad?.stops ?? []) {
+      assert.ok(offset >= 0 && offset <= 1, '色标位置必须在 [0,1]');
+      assert.ok(/^#|rgba?\(/.test(color), '色标必须是颜色');
+    }
+  }
+});
+
+// ---------------- 雀魂式模板：桌前筹码 / 角位座位 ----------------
+
+test('ui3/39 桌前筹码：枚数=投入÷注级（封顶8）、堆位朝桌心、不压按钮与座位板、飞筹两端逐字节一致', () => {
+  // ① 折算公式
+  assert.equal(chipStackCount(0, 1), 0, '没投入就不画堆');
+  assert.equal(chipStackCount(3, 1), 3);
+  assert.equal(chipStackCount(4, 2), 2);
+  assert.equal(chipStackCount(1, 0), 0, '注级未知时宁可画不出，不许除零');
+  assert.equal(chipStackCount(999, 1), 8, '视觉封顶 8 枚');
+  // ② 开局（各家已下底注）⇒ 每家都有筹码堆
+  const snap = snapshot(opened({ bots: 2 }));
+  const sc = buildScene(snap, 960, 620, TABLE_STYLE);
+  const chipEllipses = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && Math.abs(p.rx - 11) < 0.01);
+  assert.ok(chipEllipses.length >= 3, '开局至少三家各有筹码堆');
+  for (const c of chipEllipses) {
+    assert.ok(c.cx >= 0 && c.cy >= 0 && c.cx <= sc.width + 1 && c.cy <= sc.height + 1, `筹码画出画布 (${String(c.cx)},${String(c.cy)})`);
+  }
+  // 筹码堆不压任何命中区（按钮是唯一可点面）
+  for (const c of chipEllipses) {
+    for (const hit of sc.hits) {
+      const box: Rect = { x: c.cx - c.rx, y: c.cy - c.ry, w: c.rx * 2, h: c.ry * 2 };
+      assert.ok(!intersects(box, hit.rect), `筹码堆压住按钮 ${hit.id}`);
+    }
+  }
+  // 确定性
+  assert.equal(JSON.stringify(sc), JSON.stringify(buildScene(snap, 960, 620, TABLE_STYLE)));
+  // ③ 飞行筹码：t=0（未起飞）与 t≥总时长都与不带 chips 逐字节一致；中途多出飞行筹码
+  const seat0 = snap.seats.find((x) => x.role === 'human');
+  assert.ok(seat0 !== undefined);
+  if (seat0 === undefined) return;
+  const since = 9000;
+  const withChips = (now: number): ReturnType<typeof buildScene> =>
+    buildScene(snap, 960, 620, TABLE_STYLE, { now, since: {}, duration: 320, chips: { seat: seat0.seat, since, count: 2 } });
+  const plain = buildScene(snap, 960, 620, TABLE_STYLE);
+  assert.equal(JSON.stringify(withChips(since)), JSON.stringify(plain), '未起飞时不应画出飞行筹码');
+  assert.equal(JSON.stringify(withChips(since + 2000)), JSON.stringify(plain), '落定后不应再画飞行筹码');
+  const mid = withChips(since + 300);
+  assert.notEqual(JSON.stringify(mid), JSON.stringify(plain), '飞行中应当多出筹码图元');
+  const midChips = mid.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && Math.abs(p.rx - 11) < 0.01);
+  assert.ok(midChips.length === chipEllipses.length + 2, '飞行中应恰好多出 2 枚在途筹码');
+});
+
+test('ui3/40 雀魂角位：默认 3 人桌的两位对手在左上/右上两角，你在底部正中', () => {
+  const snap = snapshot(opened({ bots: 2 }));
+  assert.equal(snap.seats.length, 3, '默认桌型 = 你 + 2 机器人（可自定义 1–6 家）');
+  for (const [w, h] of [[560, 560], [720, 640], [960, 620], [1600, 900]] as const) {
+    const sc = buildScene(snap, w, h, TABLE_STYLE);
+    assert.ok(sc.plates.length === 3, `${String(w)}×${String(h)} 座位板数量不对`);
+    const top = sc.plates.filter((p) => p.y === TABLE_STYLE.pad + 32);
+    assert.equal(top.length, 2, `${String(w)}×${String(h)} 对手板应同在顶部一条线上`);
+    const left = top[0];
+    const right = top[1];
+    assert.ok(left !== undefined && right !== undefined);
+    if (left === undefined || right === undefined) continue;
+    assert.ok(left.x < right.x, '左角必须在右角左边');
+    assert.ok(Math.abs(left.x - TABLE_STYLE.pad) <= 1, `左角板应贴左缘（x=${String(left.x)}）`);
+    assert.ok(Math.abs(right.x + right.w - (w - TABLE_STYLE.pad)) <= 1, `右角板应贴右缘（x=${String(right.x)}）`);
+    const own = sc.plates.find((p) => p.y > TOP_BAR + 100);
+    assert.ok(own !== undefined && Math.abs(own.x + own.w / 2 - w / 2) <= 1, `${String(w)}×${String(h)} 本人板应在底部正中`);
+  }
+  // 人数可自定义仍然成立：6 家桌 4 视口不重叠由 ui3/19 守护，这里只钉"板数随人数走"
+  for (const bots of [1, 3, 5] as const) {
+    const s = snapshot(opened({ bots }));
+    assert.equal(buildScene(s, 960, 620, TABLE_STYLE).plates.length, bots + 1);
+  }
 });

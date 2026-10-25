@@ -1,11 +1,42 @@
 // M3 · 绘制执行层：只把 scene 的图元指令搬到 Canvas 上，不做任何判定、不读任何模型。
 // 拆成这一层的意义：布局逻辑（scene）能在 Node 里断言，这里薄到可以靠眼睛与截图验收。
+// 颜色纪律（ui3/29）：本文件一个十六进制色值都不许出现 —— 全部来自 scene 的图元数据
+//（含渐变色标），paint 只负责材质化。旋转/渐变都包在 save/restore 里，互不渗漏。
 import type { Primitive, Scene } from './scene.ts';
+
+type EllipsePrim = Extract<Primitive, { kind: 'ellipse' }>;
+
+// 把 scene 数据里的渐变色标材质化为 CanvasGradient（radial = 椭圆内径向，缺省 = 竖向线性）。
+function materializeGrad(ctx: CanvasRenderingContext2D, p: EllipsePrim): string | CanvasGradient {
+  const grad = p.grad;
+  if (grad === undefined) return p.fill ?? 'transparent';
+  const g = grad.radial === true
+    ? ctx.createRadialGradient(p.cx, p.cy, 0, p.cx, p.cy, Math.max(p.rx, p.ry, 1))
+    : ctx.createLinearGradient(p.cx, p.cy - p.ry, p.cx, p.cy + p.ry);
+  for (const [offset, color] of grad.stops) g.addColorStop(offset, color);
+  return g;
+}
 
 function drawPrimitive(ctx: CanvasRenderingContext2D, p: Primitive, font: string): void {  switch (p.kind) {
     case 'rect': {
-      ctx.beginPath();
       const r = Math.min(p.radius, p.rect.w / 2, p.rect.h / 2);
+      ctx.beginPath();
+      if (p.tilt !== undefined && p.tilt !== 0) {
+        // 倾斜（发牌飞行）：绕矩形中心旋转，落定后 tilt 缺省 ⇒ 走下面的无旋转路径
+        ctx.save();
+        ctx.translate(p.rect.x + p.rect.w / 2, p.rect.y + p.rect.h / 2);
+        ctx.rotate((p.tilt * Math.PI) / 180);
+        ctx.roundRect(-p.rect.w / 2, -p.rect.h / 2, p.rect.w, p.rect.h, r);
+        ctx.fillStyle = p.fill;
+        ctx.fill();
+        if (p.stroke !== null) {
+          ctx.strokeStyle = p.stroke;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+        ctx.restore();
+        return;
+      }
       ctx.roundRect(p.rect.x, p.rect.y, p.rect.w, p.rect.h, r);
       ctx.fillStyle = p.fill;
       ctx.fill();
@@ -19,7 +50,7 @@ function drawPrimitive(ctx: CanvasRenderingContext2D, p: Primitive, font: string
     case 'ellipse': {
       ctx.beginPath();
       ctx.ellipse(p.cx, p.cy, p.rx, p.ry, 0, 0, Math.PI * 2);
-      ctx.fillStyle = p.fill;
+      ctx.fillStyle = materializeGrad(ctx, p);
       ctx.fill();
       if (p.stroke !== null) {
         ctx.strokeStyle = p.stroke;

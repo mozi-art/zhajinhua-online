@@ -12,7 +12,9 @@ import type { Snapshot, StartOptions, Ui } from './bridge.ts';
 import { createNet, roomUrlFrom, ROOM_CODE_ALPHABET, toMove, WIRE_SUBPROTOCOL } from './netplay.ts';
 import type { Net, NetInfo, Store } from './netplay.ts';
 import { paint } from './paint.ts';
-import { buildScene, hitAt, TABLE_STYLE } from './scene.ts';
+import { buildScene, hitAt, INK_STYLE, PAPER_STYLE, TABLE_STYLE } from './scene.ts';
+import type { Style } from './scene.ts';
+import { createSfx } from './sfx.ts';
 import type { Intent } from '../webmin/model.ts';
 
 type Mode = 'solo' | 'online';
@@ -31,6 +33,32 @@ const FLIP_MS = 320;
 // seat → 该座位牌面首次可见的时刻（换局或重新变暗时清掉，下一轮会重新起翻牌）
 let flipSince: Record<number, number> = {};
 let frameId = 0;
+// 发牌动画：单张飞行 260ms、相邻两张错峰 70ms；局号变化 ⇒ 本局从现在起飞。
+const DEAL_FLIGHT = 260;
+const DEAL_STAGGER = 70;
+let dealStart = 0;
+let dealtHand = -1; // 已播过（或正在播）发牌动画的局号
+// 筹码动画：逐座位盯 committed（与 armFlips 同一 diff 纪律）——投入增加 ⇒ 新筹码飞向桌前堆。
+const CHIP_FLIGHT = 420;
+const CHIP_STAGGER = 60;
+let chipPrev: Record<number, number> = {};
+let chipAnim: { seat: number; since: number; count: number } | null = null;
+
+// —— 主题 / 音效 / 悬停（第一批新增，全部只待在入口层）——
+// 主题三档循环；缺省就是 TABLE_STYLE（桌绿），既有用例与验收截图都按它验收。
+const THEMES: { id: string; label: string; style: Style }[] = [
+  { id: 'table', label: '桌绿', style: TABLE_STYLE },
+  { id: 'ink', label: '墨金', style: INK_STYLE },
+  { id: 'paper', label: '月白', style: PAPER_STYLE },
+];
+let themeIdx = 0;
+let currentStyle: Style = TABLE_STYLE;
+// 悬停：坐标只在 mousemove 里更新；命中目标变化才重绘一次（不做 mousemove 驱动的常驻帧）。
+let hoverPt: { x: number; y: number } | null = null;
+let hoverId: string | null = null;
+const sfx = createSfx();
+let prevPhase = ''; // 结算音效：只在 phase 跨入 settled 的那一次响
+let lastLive = ''; // aria-live 只在内容变化时播报
 
 function clockMs(): number {
   return performance.now();
@@ -249,6 +277,20 @@ function armFlips(snap: Snapshot, now: number): void {
   flipSince = next;
 }
 
+// 逐座位盯投入：某家 committed 增加 ⇒ 记一次筹码飞行（新增枚数按注级折算，封顶 4 枚/次）。
+// 结算阶段的清零不算下注（钱是被收走的，不是飞出去的）。
+function armChips(snap: Snapshot, now: number): void {
+  for (const seat of snap.seats) {
+    const prev = chipPrev[seat.seat];
+    if (prev !== undefined && seat.committed > prev && snap.phase === 'betting') {
+      const stake = Math.max(1, snap.stake);
+      const grew = Math.round(seat.committed / stake) - Math.round(prev / stake);
+      chipAnim = { seat: seat.seat, since: now, count: Math.max(1, Math.min(4, grew)) };
+    }
+    chipPrev[seat.seat] = seat.committed;
+  }
+}
+
 function hintText(snap: Snapshot): string {
   // 连接层的话（连不上 / 断了 / 名字没填被拦 / 已离桌）优先于一切牌局文案 —— 哪怕页面此刻在单机态：
   // 失败提示只在联机态显示的话，"切联机被拦"就成了一句谁也看不见的悄悄话（真机实测缺陷）。
@@ -262,6 +304,65 @@ function hintText(snap: Snapshot): string {
     return snap.status;
   }
   return ui.lastError ?? (ui.session === null ? '未开局' : `点击 ${String(ui.clicks)} · 被拒 ${String(ui.rejections)}`);
+}
+
+// —— 小工具：提示行、会话级存储（主题/静音态；与 netplay 的凭据存储同一降级口径） ——
+function say(msg: string): void {
+  const line = el<HTMLElement>('hint');
+  if (line !== null) line.textContent = msg;
+}
+
+function storeGet(key: string): string | null {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null; // 存不进去就只活到刷新，绝不悄悄换全局存储
+  }
+}
+
+function storeSet(key: string, value: string): void {
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    // 同上，静默降级
+  }
+}
+
+const THEME_KEY = 'zjh-ui-theme';
+const MUTE_KEY = 'zjh-ui-mute';
+
+function applyTheme(idx: number): void {
+  themeIdx = ((idx % THEMES.length) + THEMES.length) % THEMES.length;
+  const t = THEMES[themeIdx];
+  if (t === undefined) return;
+  currentStyle = t.style;
+  document.body.dataset['theme'] = t.id;
+  const btn = el<HTMLButtonElement>('themeBtn');
+  if (btn !== null) btn.textContent = `主题：${t.label}`;
+  storeSet(THEME_KEY, String(themeIdx));
+  render();
+}
+
+function applyMute(muted: boolean): void {
+  sfx.setMuted(muted);
+  storeSet(MUTE_KEY, muted ? '1' : '0');
+  const btn = el<HTMLButtonElement>('muteBtn');
+  if (btn !== null) btn.textContent = muted ? '音效：关' : '音效：开';
+}
+
+function toggleMute(): void {
+  applyMute(!sfx.isMuted());
+  say(sfx.isMuted() ? '音效已关' : '音效已开，下次动作时响起');
+}
+
+// 空格：跳过本局发牌演出 —— 把起点拨到"早已结束"，scene 一次性落到终态（不逐帧快进）
+function skipDeal(): void {
+  const snap = currentSnapshot();
+  const total = DEAL_STAGGER * (Math.max(1, snap.seats.length) * 3 - 1) + DEAL_FLIGHT;
+  if (snap.started && clockMs() - dealStart < total) {
+    dealStart = clockMs() - total - 1;
+    render();
+  }
 }
 
 function render(): void {
@@ -279,13 +380,54 @@ function render(): void {
   const snap = currentSnapshot();
   const now = clockMs();
   armFlips(snap, now);
-  scene = buildScene(snap, w, h, TABLE_STYLE, { now, since: flipSince, duration: FLIP_MS });
+  // 发牌动画：局号变化 ⇒ 本局从现在起飞（首局 / 再来一局 / 断线重连重播一次，都是这里触发）
+  if (snap.started && snap.handIndex !== dealtHand) {
+    dealtHand = snap.handIndex;
+    dealStart = now;
+    chipPrev = {}; // 新一局重新盯投入（上一局的余数不该触发筹码飞行）
+    chipAnim = null;
+  }
+  armChips(snap, now);
+  const dealTotal = DEAL_STAGGER * (Math.max(1, snap.seats.length) * 3 - 1) + DEAL_FLIGHT;
+  const dealing = snap.started && now - dealStart < dealTotal;
+  const chipTotal = chipAnim !== null ? CHIP_STAGGER * (chipAnim.count - 1) + CHIP_FLIGHT : 0;
+  const chipFlying = chipAnim !== null && now - chipAnim.since < chipTotal;
+  scene = buildScene(
+    snap,
+    w,
+    h,
+    currentStyle,
+    {
+      now,
+      since: flipSince,
+      duration: FLIP_MS,
+      ...(dealing ? { deal: { start: dealStart, duration: DEAL_FLIGHT, stagger: DEAL_STAGGER } } : {}),
+      ...(chipFlying && chipAnim !== null ? { chips: chipAnim } : {}),
+    },
+    hoverPt,
+  );
   paint(ctx, scene);
   const line = el<HTMLElement>('hint');
-  if (line !== null) line.textContent = hintText(snap);
-  // 只在"有翻牌在飞"时续帧，落地即停 —— 不做常驻 RAF 循环
+  if (line !== null) line.textContent = dealing ? '发牌中……按空格跳过' : hintText(snap);
+  // 结算音：只在跨入 settled 的那一次响（drain 同步走完机器人，这里是唯一能观测到跨相位的点）
+  if (prevPhase !== 'settled' && snap.phase === 'settled') {
+    const me = snap.seats.find((x) => x.role === 'human');
+    if (me !== undefined && me.resultText.startsWith('赢')) sfx.win();
+    else sfx.lose();
+  }
+  prevPhase = snap.phase;
+  // aria-live：状态行 + 提示行的镜像，内容变化才写（读屏器不被重复轰炸）
+  const live = el<HTMLElement>('live');
+  if (live !== null) {
+    const msg = `${snap.status} ${line?.textContent ?? ''}`.trim();
+    if (msg !== lastLive) {
+      lastLive = msg;
+      live.textContent = msg;
+    }
+  }
+  // 只在"有翻牌在飞 / 有牌在飞 / 有筹码在飞"时续帧，落地即停 —— 不做常驻 RAF 循环
   const stillFlipping = Object.values(flipSince).some((since) => now - since < FLIP_MS);
-  if (stillFlipping && frameId === 0) {
+  if ((stillFlipping || dealing || chipFlying) && frameId === 0) {
     frameId = window.requestAnimationFrame(() => {
       frameId = 0;
       render();
@@ -294,6 +436,8 @@ function render(): void {
 }
 
 function send(intent: Intent): string | null {
+  // 重开一桌 ⇒ 新的局代际：发牌动画按局号触发，连续两局同为第 1 局时也要重播
+  if (intent.kind === 'reset') dealtHand = -1;
   if (mode === 'online') {
     if (net === null) return '还没连上房间';
     // 桌务意图必须在 toMove 之前拦下：它们不是行动（toMove 会返回 null），走的是 netplay 的
@@ -313,11 +457,19 @@ function send(intent: Intent): string | null {
     const r = net.act(move);
     if (!r.sent) return `没发出去：${r.why ?? '?'}`;
     if (sock === null || sock.readyState !== 1) return '连接不在，稍后自动重连';
+    if (intent.kind === 'look' || intent.kind === 'compare') sfx.flip();
+    else if (intent.kind === 'call' || intent.kind === 'raise') sfx.chip();
     sock.send(r.wire as string);
     render();
     return null;
   }
+  const beforeRejections = ui.rejections;
   ui = drain(dispatch(ui, intent));
+  // 音效只在"真的被引擎接受"时响：被拒的点击不该有正面反馈（灰按钮契约的听觉面）
+  if (ui.rejections === beforeRejections) {
+    if (intent.kind === 'look' || intent.kind === 'compare') sfx.flip();
+    else if (intent.kind === 'call' || intent.kind === 'raise') sfx.chip();
+  }
   render();
   return null;
 }
@@ -327,6 +479,7 @@ function boot(): void {
   const url = el<HTMLInputElement>('netUrl');
   if (url !== null && url.value === '') url.value = defaultRoomUrl();
   el<HTMLButtonElement>('newGame')?.addEventListener('click', () => {
+    dealtHand = -1; // 新桌 ⇒ 发牌动画重播（局号会回到 1，不能只认局号）
     ui = drain(start(EMPTY_UI, readOptions()));
     render();
   });
@@ -401,6 +554,94 @@ function boot(): void {
       if (why !== null && line !== null) line.textContent = why;
     }
   });
+  // 悬停反馈：指针在按钮上给 pointer 光标，命中目标变化才重绘一次（高亮由 scene 的 hover 入参画出）。
+  canvas?.addEventListener('mousemove', (ev: MouseEvent) => {
+    const box = canvas.getBoundingClientRect();
+    const x = ev.clientX - box.left;
+    const y = ev.clientY - box.top;
+    const hit = hitAt(scene, x, y);
+    canvas.style.cursor = hit !== null ? 'pointer' : 'default';
+    hoverPt = hit !== null ? { x, y } : null;
+    const id = hit?.id ?? null;
+    if (id !== hoverId) {
+      hoverId = id;
+      render();
+    }
+  });
+  canvas?.addEventListener('mouseleave', () => {
+    hoverPt = null;
+    canvas.style.cursor = 'default';
+    if (hoverId !== null) {
+      hoverId = null;
+      render();
+    }
+  });
+  // 键盘：数字键按 intent.kind 语义映射（候选顺序会随状态变，按下标映射是错的）；
+  // 焦点在输入控件里时不抢键；带修饰键的组合与按住不放都放行给浏览器。
+  const KEY_KINDS = ['look', 'call', 'raise', 'fold', 'compare', 'settle', 'nextHand', 'reset'] as const;
+  window.addEventListener('keydown', (ev: KeyboardEvent) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.repeat) return;
+    const t = ev.target as HTMLElement | null;
+    if (t !== null && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    sfx.unlock();
+    if (ev.key === 'm' || ev.key === 'M') {
+      toggleMute();
+      return;
+    }
+    if (ev.key === ' ') {
+      skipDeal();
+      ev.preventDefault();
+      return;
+    }
+    const n = Number(ev.key);
+    if (!Number.isInteger(n) || n < 1 || n > KEY_KINDS.length) return;
+    const kind = KEY_KINDS[n - 1];
+    if (kind === undefined) return;
+    const btn = currentSnapshot().buttons.find((b) => b.intent.kind === kind);
+    if (btn === undefined) return; // 这个状态没有该候选，按键就是空按
+    const why = send(btn.intent);
+    if (why !== null) say(why);
+    ev.preventDefault();
+  });
+  // 音效解锁：浏览器要求首次用户手势后才许出声；键鼠两个入口各挂一个一次性监听。
+  window.addEventListener('pointerdown', () => sfx.unlock(), { once: true });
+  el<HTMLButtonElement>('themeBtn')?.addEventListener('click', () => applyTheme(themeIdx + 1));
+  el<HTMLButtonElement>('muteBtn')?.addEventListener('click', () => {
+    sfx.unlock();
+    toggleMute();
+  });
+  el<HTMLButtonElement>('fsBtn')?.addEventListener('click', () => {
+    const root = document.documentElement;
+    try {
+      if (document.fullscreenElement !== null) {
+        void document.exitFullscreen().catch(() => {});
+        return;
+      }
+      if (typeof root.requestFullscreen !== 'function') {
+        say('这个浏览器不支持全屏 API');
+        return;
+      }
+      root
+        .requestFullscreen()
+        .then(() => render())
+        .catch((err: unknown) => say(`全屏被拒绝：${String((err as Error).message ?? err)}`));
+    } catch (err) {
+      say(`全屏不可用：${String((err as Error).message ?? err)}`);
+    }
+  });
+  // 恢复上次的主题与静音态（读不出来就按缺省：桌绿 + 静音）
+  const savedTheme = Number(storeGet(THEME_KEY));
+  if (Number.isInteger(savedTheme) && savedTheme >= 0 && savedTheme < THEMES.length) {
+    themeIdx = savedTheme;
+    const t = THEMES[themeIdx];
+    if (t !== undefined) {
+      currentStyle = t.style;
+      document.body.dataset['theme'] = t.id;
+      const btn = el<HTMLButtonElement>('themeBtn');
+      if (btn !== null) btn.textContent = `主题：${t.label}`;
+    }
+  }
+  applyMute(storeGet(MUTE_KEY) !== '0'); // 缺省静音
   window.addEventListener('resize', render);
   syncModeControls();
   render();
@@ -438,6 +679,7 @@ window.__zjh3 = {
   },
   newGame: (opts?: Partial<StartOptions>) => {
     const base = readOptions();
+    dealtHand = -1; // 与 newGame 按钮同口径：发牌动画重播
     ui = drain(start(EMPTY_UI, { ...base, ...opts }));
     render();
     return snapshot(ui).status;
