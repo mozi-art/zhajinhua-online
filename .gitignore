@@ -24,3 +24,6 @@ Thumbs.db
 
 # 空的历史遗留文件（0 字节，非本项目产物）
 qoder.py
+
+# ZCode 会话工作目录（agent 过程产物，不属于项目）
+.zcode/

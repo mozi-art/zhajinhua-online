@@ -49,6 +49,9 @@ export type PeerInfo = {
   committed: string[];
   verifiedHand: number | null;
   nonceSent: boolean;
+  // hosted 流程的桌况（来自 table 下行；auto 房间没有这条消息 ⇒ 全部为零值）。
+  // 这里只存放、不判定：等待/准备/房主的语义归 netplay 的视图层。
+  table: { host: number; ready: number[]; waiting: boolean; playing: boolean } | null;
 };
 
 // 快照的 log 应当覆盖本局 1..seq；增量的 log 应当正好是 (since, seq] 这一段。
@@ -73,6 +76,7 @@ export function createPeer(options: PeerOptions) {
   let token = restore?.token ?? '';
   let rules: Rules | null = null;
   let roster: Roster[] = [];
+  let table: PeerInfo['table'] = null; // auto 房间收不到 table ⇒ 保持 null
   // 恢复时**故意不带 seq / log**：刷新后的这一页确实一条消息都没看到，声称看到 N 条会让
   // "增量必须接得上号"那道闸先炸（合并后条数 != seq）。报 hand 而不报 seq，服务端就会把整段日志
   // 作为 (0, seq] 的增量补回来，客户端的不变式从头到尾成立。
@@ -187,7 +191,9 @@ export function createPeer(options: PeerOptions) {
     // 还没进过任何一手（hand=0）⇒ 没有可接续的局面，而且 hand=0 本身就是协议非法值：
     // 这时候必须返回 null，让上层去走一条全新的 join（webui/main.ts 的 resumeWire() ?? joinWire()）。
     resume(): Up | null {
-      return token === '' || hand < 1 ? null : { t: 'resume', token, hand, since: seq };
+      // hand=0 是"等待期重连"（hosted 流程还没开过局）：resume 的 hand 字段允许 0。
+      // 不放行的话，等待期掉线只能重新 join ⇒ 旧座位变鬼影 + 多占一座（hosted 真机路径撞出来的）。
+      return token === '' ? null : { t: 'resume', token, hand, since: seq };
     },
     // 换一桌重来（凭据被服务端判死之后重新入桌）：把"这一世的身份 + 本局份额"整份丢掉。
     // 不丢的话，恢复下来的 myShare 会顶着**上一桌**那份份额，对新的 collect 永远不再交份额
@@ -349,6 +355,12 @@ export function createPeer(options: PeerOptions) {
         case 'pong': {
           break;
         }
+        case 'table': {
+          // 纯状态面：无权威数字、无牌面 ⇒ 不进算术墙；schema 已在 checkDown 过了。
+          // 覆盖式更新即可（table 每次都带全量桌况，不做增量合并）。
+          table = { host: msg.host, ready: [...msg.ready], waiting: msg.waiting, playing: msg.playing };
+          break;
+        }
         default: {
           const exhausted: never = msg;
           violate(`unhandled downlink ${JSON.stringify(exhausted)}`);
@@ -373,6 +385,7 @@ export function createPeer(options: PeerOptions) {
         committed: [...commitments.keys()].sort(),
         verifiedHand,
         nonceSent: nonceForHand === hand && hand > 0,
+        table,
       };
     },
     viewOf(): View | null {

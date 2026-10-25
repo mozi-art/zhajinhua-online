@@ -41,6 +41,11 @@ const UPS: Up[] = [
   { t: 'action', hand: 3, move: { kind: 'look' } },
   { t: 'action', hand: 3, move: { kind: 'compare', target: 1 } },
   { t: 'resume', token: 'a'.repeat(40), hand: 3, since: 12 },
+  { t: 'leave' },
+  { t: 'ready', on: true },
+  { t: 'ready', on: false },
+  { t: 'begin' },
+  { t: 'rename', name: '小明' },
   { t: 'ping', echo: 7 },
 ];
 
@@ -54,6 +59,7 @@ const DOWNS: Down[] = [
     rules: presets.classic,
     seats: [{ seat: 0, name: '甲' }, { seat: 2, name: '小庄' }],
   },
+  { t: 'table', host: 0, ready: [0, 2], waiting: true, playing: false },
   { t: 'commit', hand: 1, party: 'server', commit: 'c'.repeat(64) },
   { t: 'collect', hand: 1, committed: ['seat:0'], missing: ['seat:1', 'server'] },
   { t: 'view', hand: 1, seq: 1, view: sampleView(0) },

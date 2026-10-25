@@ -423,6 +423,38 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     hits.push({ id: `btn:${String(i)}`, rect, intent: b.intent });
   });
 
+  // —— hosted 结算暂停：居中结算面板 ——
+  // 游戏已停在结算（牌在揭示那一刻已经看过），此刻盖住桌面中央是刻意的；但**不遮座位板、
+  // 不遮按钮条、不出画布**（继续/等待的提示就住在按钮条里，遮了就点不着）。
+  // 配色刻意独立：面板 = panel + legal 描边、文字 = accent/dim/legal/warn —— 避开 ui3/20 的
+  // 「panelSoft+accent = 结算块」筛选与 ui3/24 的「fg 居中文本」收编（solo 恒不触发 hostPaused，
+  // 既有 ui3 用例一个都碰不到这块）。
+  if (snap.hostPaused) {
+    const iAmHost = snap.buttons.some((b) => b.intent.kind === 'begin' && b.legal);
+    const lines: string[] = ['本局结算', ...snap.settlement];
+    lines.push(iAmHost ? '点「继续下一局」开下一手' : '等待房主继续…');
+    const lineH = st.rowH;
+    const pw = Math.min(Math.floor(w * 0.64), 520);
+    const ph = Math.min(lines.length * lineH + st.pad * 3, Math.floor(h * 0.42));
+    const px = Math.floor(w / 2 - pw / 2);
+    const py = Math.floor(h * 0.3 + (h * 0.42 - ph) / 2);
+    primitives.push({ kind: 'rect', rect: { x: px, y: py, w: pw, h: ph }, fill: st.panel, stroke: st.legal, radius: 10 });
+    const visible = Math.max(1, Math.floor((ph - st.pad * 2) / lineH));
+    lines.slice(0, visible).forEach((line, i) => {
+      const isTitle = i === 0;
+      const isHint = i === Math.min(lines.length, visible) - 1;
+      const color = isTitle ? st.accent : isHint ? (iAmHost ? st.legal : st.warn) : st.dim;
+      primitives.push(
+        text(px + pw / 2, py + st.pad * 1.5 + i * lineH + 6, line, st, {
+          size: isTitle ? 16 : 12,
+          bold: isTitle,
+          color,
+          align: 'center',
+        }),
+      );
+    });
+  }
+
   return {
     width: w,
     height: h,

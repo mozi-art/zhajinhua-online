@@ -744,3 +744,16 @@ test('ui/20 亮牌文本行：ASCII 记法逐张对得上，且只列真亮出�
   assert.equal(handAscii([{ rank: 7, suit: 0 }, { rank: 10, suit: 1 }, { rank: 13, suit: 3 }]), '7S TH KD', 'ASCII 记法与本行口径不一致');
   note(`UI20 ${line}`);
 });
+
+test('ui/21 大厅短链：/lobby 与 /lobby/ 都 302 到 webui/lobby.html，目标页与其模块都在白名单内', () => {
+  assert.equal(redirectTarget('/lobby'), '/webui/lobby.html');
+  assert.equal(redirectTarget('/lobby/'), '/webui/lobby.html', '带尾斜杠的写法同解');
+  assert.equal(redirectTarget('/lobby.html'), null, '只认短链那一个词，不吞别的路径');
+  const page = resolveStatic('/webui/lobby.html');
+  assert.ok(page.ok, '大厅页本身要可被静态服务端出去');
+  if (page.ok) assert.match(page.mime, /text\/html/);
+  const mod = resolveStatic('/webui/lobby.ts');
+  assert.ok(mod.ok, '大厅的模块也要放行（.ts 现场剥类型）');
+  if (mod.ok) assert.equal(mod.needsStrip, true);
+  note('ui/21 /lobby →302→ webui/lobby.html，页面与模块都过 resolveStatic');
+});

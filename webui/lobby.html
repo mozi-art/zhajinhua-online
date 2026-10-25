@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>炸金花 · 大厅</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; background: #0b1015; color: #eef4ef; font-family: "Cascadia Mono", "Consolas", "Noto Sans Mono CJK SC", monospace; }
+      header { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #141d26; border-bottom: 1px solid #24313d; font-size: 13px; }
+      header h1 { font-size: 14px; margin: 0; }
+      header a { color: #8fa398; }
+      main { flex: 1; padding: 12px; display: flex; flex-direction: column; gap: 14px; max-width: 640px; }
+      section { background: #10161d; border: 1px solid #24313d; border-radius: 8px; padding: 10px 12px; }
+      h2 { font-size: 13px; margin: 0 0 8px; color: #9fb3a8; }
+      button { background: #2f6f4f; color: #eaf5ee; border: 1px solid #7fd6a8; border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
+      input { background: #0f1720; color: #eef4ef; border: 1px solid #2b3a48; border-radius: 4px; padding: 3px 6px; font: inherit; width: 6em; text-transform: uppercase; }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li { padding: 4px 0; border-bottom: 1px dashed #1d2933; }
+      li a { color: #7fd6a8; }
+      .muted { color: #8fa398; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>炸金花 · 大厅</h1>
+      <a href="./index.html">回到牌桌</a>
+    </header>
+    <main>
+      <section>
+        <div class="row">
+          <button id="newRoom">开一张新桌</button>
+          <span class="muted">把这一桌的链接发给同一网络里的朋友（房间码 4 位，无 0/1/O/I/L）</span>
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <span>或输入房间码</span>
+          <input id="codeInput" maxlength="4" placeholder="AB3K" />
+          <button id="joinCode">进入</button>
+          <span id="codeNote" class="muted"></span>
+        </div>
+      </section>
+      <section>
+        <h2>在座的桌子</h2>
+        <ul id="roomList"></ul>
+        <p id="listNote" class="muted"></p>
+      </section>
+    </main>
+    <script type="module" src="./lobby.ts"></script>
+  </body>
+</html>

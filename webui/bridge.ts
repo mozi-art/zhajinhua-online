@@ -42,6 +42,9 @@ export type Snapshot = {
   over: string | null;
   note: string | null;
   dealerRule: string;
+  // hosted 结算暂停：settle+揭示之后等房主「继续」的那段时间（居中结算面板的开关）。
+  // 单机与 auto 联机恒 false —— 键集由 nui/01/21 双向全等地钉着，四处产出点必须同进退。
+  hostPaused: boolean;
 };
 
 export type StartOptions = {
@@ -86,6 +89,7 @@ export function snapshot(ui: Ui): Snapshot {
       over: null,
       note: ui.lastError,
       dealerRule: DEALER_NEXT_LABELS.rotate,
+      hostPaused: false,
     };
   }
   return {
@@ -111,6 +115,7 @@ export function snapshot(ui: Ui): Snapshot {
     over: s.over,
     note: s.note,
     dealerRule: DEALER_NEXT_LABELS[s.rules.dealer.next] ?? '?',
+    hostPaused: false,
   };
 }
 

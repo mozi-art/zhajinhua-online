@@ -442,13 +442,29 @@ test('client/15 logShape 三道闸门报错文本互不相同，合法增量则�
   assert.equal(q.info().logLen, s3.seq);
 });
 
-test('client/16 拿到 token 但还没进过任何一手 ⇒ resume 发不出去（hand=0 是协议非法值），上层因此会改走 join', () => {
+test('client/16 等待期（hand=0）也能凭 token resume —— hosted 掉线不该被迫重新 join 占新座', () => {
+  // 口径改写（保留 ID）：原断言"hand=0 是协议非法值 ⇒ resume 不给"。hosted 流程上线后它成了缺陷 ——
+  // 等待期掉线的人只能重新 join ⇒ 旧座位变鬼影 + 多占一座。现在协议允许 hand=0（等待期重连，
+  // since 恒 0），与 rev=11 改写 nui/25 同一先例：边界变了，测试跟着边界走。
   const p = probe();
   p.inbound(HELLO);
   assert.equal(p.info().hand, 0, '构造前提：只入座、没开过任何一手');
-  assert.equal(p.resume(), null, 'hand=0 的 resume 会被 encodeUp 判非法 ⇒ 这里必须直接不给');
+  const wait = p.resume();
+  assert.ok(wait !== null && wait.t === 'resume' && wait.hand === 0 && wait.since === 0, '等待期 resume：hand=0、since=0');
   const st = hand(2);
   p.inbound({ t: 'view', hand: 1, seq: st.seq, view: viewOf(st, 0) });
   const up = p.resume();
   assert.ok(up !== null && up.t === 'resume' && up.hand === 1, '进过一手之后就照常能重连');
+});
+
+test('client/17 table 下行：覆盖式存储并在 info() 暴露；auto 房间收不到 ⇒ 恒 null', () => {
+  const p = probe();
+  assert.equal(p.info().table, null, 'auto 房间没有 table 下行，桌况保持 null');
+  p.inbound(HELLO);
+  assert.equal(p.info().table, null, 'hello 不携带桌况');
+  p.inbound({ t: 'table', host: 2, ready: [2, 4], waiting: true, playing: false });
+  assert.deepEqual(p.info().table, { host: 2, ready: [2, 4], waiting: true, playing: false });
+  p.inbound({ t: 'table', host: 4, ready: [], waiting: false, playing: true });
+  assert.deepEqual(p.info().table, { host: 4, ready: [], waiting: false, playing: true }, '每次全量覆盖，不做增量合并');
+  assert.deepEqual(p.info().violations, [], 'table 是纯状态面：不该触发任何越界');
 });

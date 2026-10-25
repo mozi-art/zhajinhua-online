@@ -29,8 +29,9 @@ const PORTABLE = [
   'netx/room.ts',
   'webui/netplay.ts',
 ];
-// 只有这两份允许碰 node: 与真实时钟
-const SOCKET_LAYER = ['netx/ws.ts', 'netx/serve.ts'];
+// 只有这三份允许碰 node: 与真实时钟（M6 起 hub.ts 也是 socket 层：多房间路由是服务端专属，
+// 浏览器端永远不需要它 —— 房间码本身的校验在可移植的 protocol.ts 里）
+const SOCKET_LAYER = ['netx/ws.ts', 'netx/serve.ts', 'netx/hub.ts'];
 
 test('nst/01 扫描范围覆盖 netx 全部源文件，可移植清单里的文件都真实存在', () => {
   const files = netxFiles();

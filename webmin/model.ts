@@ -30,7 +30,12 @@ export type Intent =
   | { kind: 'compare'; target: number }
   | { kind: 'settle' }
   | { kind: 'nextHand' }
-  | { kind: 'reset' };
+  | { kind: 'reset' }
+  // M6 联机桌务（hosted 流程）：准备 / 房主开局与续局。单机路径没有对应操作 ——
+  // toAction 返回 null，act() 走 unknown_intent（ok:false + note，不抛）；
+  // 刻意不进 CANDIDATE_INTENTS（单机按钮条不许多出这两颗，ui3/09/14/22 盯着）。
+  | { kind: 'ready' }
+  | { kind: 'begin' };
 
 export type IntentOption = { intent: Intent; label: string; cost: number; target: number };
 
@@ -521,6 +526,8 @@ function toAction(intent: Intent, seat: number): Action | null {
       return { kind: 'settle' };
     case 'nextHand':
     case 'reset':
+    case 'ready':
+    case 'begin':
       return null;
     default: {
       const exhausted: never = intent;

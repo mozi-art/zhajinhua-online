@@ -243,19 +243,21 @@ test('ws/02 /health 可读；普通 HTTP 请求不会误入升级分支', async 
 });
 
 // 裸 HTTP 升级请求：用来构造"协议层面就不合格"的握手（Node 的 WebSocket 客户端不会发这种东西）。
-// 值为 null ⇒ 整条头字段都不发；缺省 ⇒ 发合法值。
-type UpgradeOpts = { version?: string | null; upgrade?: string | null; connection?: string | null; key?: string | null; protocol?: boolean };
+// 值为 null ⇒ 整条头字段都不发；缺省 ⇒ 发合法值。origin 只在这条工装里出现：
+// undici 的 WebSocket 不是浏览环境、不发明 Origin 头，所以四态（有/无/同源/跨源）只能裸构造。
+type UpgradeOpts = { version?: string | null; upgrade?: string | null; connection?: string | null; key?: string | null; protocol?: boolean; origin?: string | null };
 
 function upgradeLines(o: UpgradeOpts = {}): string[] {
   const lines: string[] = ['GET / HTTP/1.1', 'Host: 127.0.0.1'];
   const push = (name: string, value: string | null | undefined): void => {
-    if (value === null) return;
+    if (value === null || value === undefined) return;
     lines.push(`${name}: ${value}`);
   };
   push('Upgrade', o.upgrade === undefined ? 'websocket' : o.upgrade);
   push('Connection', o.connection === undefined ? 'Upgrade' : o.connection);
   push('Sec-WebSocket-Key', o.key === undefined ? 'dGhlIHNhbXBsZSBub25jZQ==' : o.key);
   push('Sec-WebSocket-Version', o.version === undefined ? '13' : o.version);
+  push('Origin', o.origin === undefined ? null : o.origin);
   if (o.protocol === true) lines.push('Sec-WebSocket-Protocol: zjh-m4-1');
   return lines;
 }
@@ -617,4 +619,49 @@ test('ws/08 Connection 头的四种"我们不肯放行"写法全部停在 Node �
     await room.close();
   }
   note(`ws/08 ${String(variants.length)} 种 Connection 写法全部由 Node 层答 404（正文即判据），我们那三行 400 在本机 Node 上按构造不可达`);
+});
+
+// M6 · Origin 守卫（CSWSH 缓解）四态。规则：无 Origin 放行（非浏览器工具；本文件全部既有用例
+// 裸连即是这条的持续证据）；Origin 的 hostname 与 Host 的 hostname 等值放行（**忽略端口**，
+// vite dev 在 127.0.0.1:5173 端页面、连 127.0.0.1 的 ws 是合法开发流）；不等值或 Origin: null 拒 403。
+// 刻意**不做** localhost↔127.0.0.1 归一 —— 第⑤组对照把它钉成断言：用 http://localhost 打开页面
+// 会被拒，文档口径是"以 IP 访问"，不为机器别名悄悄开口子。
+test('ws/10 Origin 守卫四态：同 hostname 跨端口放行、跨源/Origin:null 拒 403 独特正文、无 Origin 放行', async () => {
+  const room = createWsRoom({ seats: [{ seat: 0, name: '甲' }, { seat: 1, name: '乙' }], firstDealer: 0 });
+  const portNo = await room.listen(0);
+  const bodyOf = (res: Buffer): string => {
+    const text = res.toString('latin1');
+    const at = text.indexOf('\r\n\r\n');
+    return at < 0 ? '' : text.slice(at + 4).replace(/\r?\n/g, '');
+  };
+  try {
+    // ① 同 hostname、跨端口（vite dev 流）：放行
+    const dev = (await rawRequest(portNo, upgradeLines({ origin: 'http://127.0.0.1:5173', protocol: true }), '', headDone)).toString('latin1');
+    assert.match(dev, /HTTP\/1\.1 101 /, `同 hostname 跨端口该放行，实得 ${dev.slice(0, 40)}`);
+    // ② 无 Origin（非浏览器工具、本文件既有用例的常态）：放行 —— 四态之一，显式钉住
+    const bare = (await rawRequest(portNo, upgradeLines({ protocol: true }), '', headDone)).toString('latin1');
+    assert.match(bare, /HTTP\/1\.1 101 /, '无 Origin 该放行（工具与自家测试都裸连）');
+    // ③ 跨源：拒 403，带自己的正文（与其他 guard 的正文互不相同，可归因）
+    const evil = (await rawRequest(portNo, upgradeLines({ origin: 'https://evil.com' }))).toString('latin1');
+    assert.equal(evil.split('\r\n')[0], 'HTTP/1.1 403 Forbidden', `跨源该 403，实得 ${evil.slice(0, 40)}`);
+    assert.equal(bodyOf(Buffer.from(evil, 'latin1')), 'origin not allowed for this endpoint');
+    assert.match(evil, /Connection: close/);
+    // ④ Origin: null（file:// / 沙箱 iframe）：拒 —— 本服务端的页面永远从自己端口端出去
+    const nul = (await rawRequest(portNo, upgradeLines({ origin: 'null' }))).toString('latin1');
+    assert.equal(nul.split('\r\n')[0], 'HTTP/1.1 403 Forbidden', 'Origin: null 该拒（不是本端点的页面）');
+    assert.equal(bodyOf(Buffer.from(nul, 'latin1')), 'origin not allowed for this endpoint');
+    // ⑤ 对照：localhost ≠ 127.0.0.1 —— 刻意不归一，谁用别名打开谁换 IP 访问
+    const alias = (await rawRequest(portNo, upgradeLines({ origin: 'http://localhost:5173' }))).toString('latin1');
+    assert.equal(alias.split('\r\n')[0], 'HTTP/1.1 403 Forbidden', 'localhost 与 127.0.0.1 不做归一（规则最小化）');
+    // ⑥ Host 头缺失但带跨源 Origin：解析不出 hostname ⇒ 按跨源处理，不放行
+    const noHost = (await rawRequest(portNo, upgradeLines({ origin: 'https://evil.com' }).filter((l) => l !== 'Host: 127.0.0.1'))).toString('latin1');
+    assert.equal(noHost.split('\r\n')[0], 'HTTP/1.1 403 Forbidden', 'Host 缺失时 Origin 守卫仍按跨源处理');
+    // 恰好两条连接 = ①②那两次 101（对照组，证明升级真的发生过）；③④⑤⑥ 四发 403 一条都不许留下
+    //（裸 destroy 后服务端的落账是异步且平台相关的既有行为，不做零连接断言 —— ws/05 同口径）
+    assert.equal(room.info().connections.length, 2, '四发 403 都不许建连；多出来的就是有拒绝漏了');
+    assert.equal(room.info().fault, null);
+    note('ws/10 Origin 四态：同 hostname 跨端口 101 / 无 Origin 101 / 跨源、null、localhost 别名、缺 Host+跨源 均 403（正文独特、零建连）');
+  } finally {
+    await room.close();
+  }
 });

@@ -57,6 +57,8 @@ export function redirectTarget(requestUrl: string): string | null {
   // 根路径仍指向 M1.5：rev=3–5 的复跑命令与验收证据都以它为入口，不能悄悄换页面。
   if (raw === '/' || raw === '/index.html' || raw === '/webmin' || raw === '/webmin/') return '/webmin/index.html';
   if (raw === '/webui' || raw === '/webui/') return '/webui/index.html';
+  // M6 大厅短链。只做路径映射（纯函数、零 netx 依赖）；目标页自己在 webui/ 白名单目录里。
+  if (raw === '/lobby' || raw === '/lobby/') return '/webui/lobby.html';
   return null;
 }
 

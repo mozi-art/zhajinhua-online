@@ -8,7 +8,8 @@ import type { Room } from '../netx/room.ts';
 import type { Move } from '../netx/protocol.ts';
 import { createNet } from '../webui/netplay.ts';
 import type { Net, Store } from '../webui/netplay.ts';
-import { buttonRow, toMove } from '../webui/netplay.ts';
+import { buttonRow, roomUrlFrom, toMove } from '../webui/netplay.ts';
+import { normalizeRoomCode } from '../netx/protocol.ts';
 import {
   dispatch as soloDispatch,
   drain as soloDrain,
@@ -78,6 +79,7 @@ function openRig(
     startAt?: number | false;
     minBuyIn?: number;
     entropySeed?: number;
+    flow?: 'auto' | 'hosted';
   } = {},
 ): Rig {
   const clock = fakeClock(0);
@@ -95,6 +97,7 @@ function openRig(
     nonceMs: opts.nonceMs ?? 20000,
     settleMs: opts.settleMs ?? 200,
     handGapMs: opts.handGapMs ?? 60000,
+    flow: opts.flow,
   });
   function pump(tab: Tab): number {
     // 注意：room.pending() 是"取走"语义 —— 拿它探测会把消息丢掉。
@@ -1793,4 +1796,122 @@ test('nui/30 标签页账的读判据：坏 JSON 与形状不对一律降级成"
   assert.equal(a.net.info().untrusted, false, '对照：这一页从没被抓过，不该有粘性');
   assert.equal(rig.room.info().fault, null);
   note('nui/30 标签页账：坏 JSON/形状不对一律降级成"没有"，合法账照实停手并报次数；与凭据那把键互不牵连');
+});
+
+// M6 · 房间地址推导：?room=CODE ⇒ ws://host:port/r/CODE（校验用 protocol 的 normalizeRoomCode，
+// 与服务端路由同一个定义）；端口兜底从 main.ts 传入（srv/05 钉着 '8790' 字面量留在入口文件）。
+test('nui/31 roomUrlFrom：hostname/端口兜底、?room= 合法拼 /r/、非法码当没带', () => {
+  const base = (hostname: string, port: string): { hostname: string; port: string } => ({ hostname, port });
+  assert.equal(roomUrlFrom(base('', ''), '', '8790'), 'ws://127.0.0.1:8790', 'file:// 那种空 hostname 用 127.0.0.1 兜底');
+  assert.equal(roomUrlFrom(base('192.168.1.5', ''), '', '8790'), 'ws://192.168.1.5:8790', '空端口用入口传进来的兜底端口');
+  assert.equal(roomUrlFrom(base('127.0.0.1', '9000'), '', '8790'), 'ws://127.0.0.1:9000', '页面自己带着端口就用页面的');
+  assert.equal(roomUrlFrom(base('127.0.0.1', '9000'), '?room=ab3k', '8790'), 'ws://127.0.0.1:9000/r/AB3K', '小写码归一成大写再拼路径');
+  assert.equal(roomUrlFrom(base('127.0.0.1', '9000'), '?room=AB3K', '8790'), 'ws://127.0.0.1:9000/r/AB3K');
+  assert.equal(roomUrlFrom(base('127.0.0.1', '9000'), '?foo=1&room=ab3k', '8790'), 'ws://127.0.0.1:9000/r/AB3K', '码不在第一个参数也要找得到');
+  for (const bad of ['?room=ab0k', '?room=AB3K5', '?room=abil', '?room=', '?room=%20B3K']) {
+    assert.equal(roomUrlFrom(base('127.0.0.1', '9000'), bad, '8790'), 'ws://127.0.0.1:9000', `非法码（${bad}）当没带：退回普通地址，不拼 /r/`);
+  }
+  // 与服务端同一个定义的实证：normalizeRoomCode 认的码这里全认、不认的全不认（防两边漂移）
+  assert.equal(roomUrlFrom(base('h', '1'), `?room=${String(normalizeRoomCode('np2s'))}`, '8790'), 'ws://h:1/r/NP2S');
+  assert.equal(normalizeRoomCode('0O1I'), null, '对照组：字母表外字符在源头就不合法');
+  note('nui/31 roomUrlFrom：兜底链（hostname→127.0.0.1、port→入口字面量）+ ?room= 合法拼 /r/、非法忽略');
+});
+
+// 离桌的页面侧接缝：leaveWire 清凭据 + 换新身份 + 产出一条不带任何字段的 leave 上行
+//（座位由连接绑定，与 action 同口径 —— 消息里不许出现 seat 之类的字段）。
+test('nui/32 leaveWire：凭据清除、重连身份作废、上行就是一条干净的 leave', () => {
+  const store = makeStore();
+  const net = createNet({ name: '甲', buyIn: 256, entropy: counterEntropy(0x99000001), store });
+  const wire = net.leaveWire();
+  const parsed = JSON.parse(wire) as Record<string, unknown>;
+  assert.equal(parsed['t'], 'leave');
+  assert.deepEqual(Object.keys(parsed), ['t'], 'leave 不带任何字段（座位由连接绑定，与 action 同口径）');
+  assert.equal(net.resumeWire(), null, '离桌之后本地不再持有可凭据重连的身份（下一次连接 = 全新入座）');
+  assert.equal(store.get('zjh-m5:session'), null, '离桌要清掉本地凭据（与 joinWire 同一套清理）');
+  note('nui/32 leaveWire 产出 {"t":"leave"}，凭据与身份一并作废');
+});
+
+// M6 hosted 全链路：等待（准备/开始）→ 开局 → 托管打完一手 → 结算暂停（继续/等待提示）→ 续局。
+// 全程走真实 createNet 栈（那道墙照常在场），托管的推进用 FakeClock（无人行动 ⇒ timeout→call 到终止③）。
+test('nui/33 hosted 全链路：等待快照、桌务回执上屏、结算暂停快照与续局，键集与单机全等', () => {
+  const rig = openRig(2, { flow: 'hosted', turnMs: 30000, settleMs: 4000, handGapMs: 6000 });
+  const t1 = rig.join('甲', makeStore()); // 座位 0 = 房主
+  const t2 = rig.join('乙', makeStore());
+  rig.pumpAll();
+  // ① 等待快照：准备按钮 + 房主的开始按钮（未齐 legal:false 带 N/M 文案）；状态行说清在等谁
+  const w1 = rig.snap(t1);
+  assert.deepEqual(
+    w1.buttons.map((b) => `${b.text}:${String(b.legal)}`),
+    ['准备:true', '开始游戏（0/2 已准备）:false'],
+    `房主的等待按钮组，实得 ${JSON.stringify(w1.buttons.map((b) => b.text))}`,
+  );
+  const w2 = rig.snap(t2);
+  assert.deepEqual(
+    w2.buttons.map((b) => `${b.text}:${String(b.legal)}`),
+    ['准备:true', '等待房主开始…:false'],
+    '非房主只有准备，等开始那一颗是灰的提示位',
+  );
+  assert.match(w1.status, /等待中·2 人在座·0 已准备/, `状态行要说清等待口径：${w1.status}`);
+  assert.deepEqual(Object.keys(w1).sort(), Object.keys(soloSnapshot(EMPTY_UI)).sort(), '键集与单机全等（hostPaused 同步产出）');
+  assert.equal(w1.hostPaused, false);
+  // ② 非房主点开始：桌务回执必须上屏（error 档的拒绝原本只活在 errors 里，谁也看不见）
+  roomSend(t2, t2.net.begin());
+  assert.ok(rig.snap(t2).note !== null && String(rig.snap(t2).note).includes('桌务被拒'), `tableError 要上提示行，实得 ${String(rig.snap(t2).note)}`);
+  // ③ 双准备 → 房主的开始亮起来 → 点开始 → 开局
+  roomSend(t1, t1.net.ready());
+  roomSend(t2, t2.net.ready());
+  const r1 = rig.snap(t1);
+  assert.deepEqual(
+    r1.buttons.map((b) => `${b.text}:${String(b.legal)}`),
+    ['取消准备:true', '开始游戏:true'],
+    '准备齐了，房主的开始按钮就该亮',
+  );
+  roomSend(t1, t1.net.begin());
+  assert.equal(rig.viewOf(t1)?.phase === null ? 0 : 1, 1, '开局之后要有局面');
+  // ④ 托管打完一手：FakeClock 推回合表，直到双方都看到 settled
+  for (let i = 0; i < 60 && rig.viewOf(t1)?.phase !== 'settled'; i += 1) {
+    rig.clock.advance(30000);
+    rig.pumpAll();
+    rig.clock.advance(4000);
+    rig.pumpAll();
+  }
+  assert.equal(rig.viewOf(t1)?.phase, 'settled', '托管应当把这一手打到结算');
+  // ⑤ 结算暂停：房主拿「继续下一局」，别人拿等待提示；hostPaused 打开
+  const e1 = rig.snap(t1);
+  const e2 = rig.snap(t2);
+  assert.equal(e1.hostPaused, true, '结算暂停期 hostPaused 必须为 true');
+  assert.equal(e2.hostPaused, true);
+  assert.deepEqual(e1.buttons.map((b) => `${b.text}:${String(b.legal)}`), ['继续下一局:true'], '房主拿继续');
+  assert.deepEqual(e2.buttons.map((b) => `${b.text}:${String(b.legal)}`), ['等待房主继续…:false'], '别人拿等待提示');
+  assert.ok(e1.settlement.length >= 2, '结算行要在（面板的数据面）');
+  // ⑥ 续局：房主点继续 → 第 2 手，无需再准备
+  roomSend(t1, t1.net.begin());
+  assert.equal(rig.viewOf(t1)?.phase, 'betting', '续局立刻进入下一手（份额由墙自动补交）');
+  assert.equal(rig.snap(t1).handIndex, 2, '局号推进到 2');
+  note('nui/33 hosted 全链路：等待/准备/开始 → 托管结算 → 暂停快照（继续/等待）→ 续局，tableError 上屏，键集全等');
+
+  function roomSend(tab: Tab, wire: string): void {
+    rig.room.receiveText(tab.conn, wire);
+    rig.pumpAll();
+  }
+});
+
+// 改名的页面侧接缝：resume 不带名字 ⇒ 重连时输入框的名字与会话不一致要补 rename。
+test('nui/34 renameWire：形状干净；端到端改名后两家名册都换新名、座位不动', () => {
+  const wire = JSON.parse(createNet({ name: '甲', buyIn: 256, entropy: counterEntropy(0x93000001), store: makeStore() }).renameWire('小明')) as Record<string, unknown>;
+  assert.equal(wire['t'], 'rename');
+  assert.deepEqual(Object.keys(wire).sort(), ['name', 't'], 'rename 只带 name（座位由连接绑定）');
+  // 端到端：两标签页入座，乙改名，双方名册与座位板都换新名
+  const rig = openRig(2, { flow: 'hosted' });
+  const t1 = rig.join('甲', makeStore());
+  const t2 = rig.join('乙', makeStore());
+  rig.pumpAll();
+  rig.room.receiveText(t2.conn, t2.net.renameWire('小明'));
+  rig.pumpAll();
+  const s1 = rig.snap(t1);
+  assert.ok(s1.seats.some((x) => x.name === '小明'), `甲的座位板要出现新名：${JSON.stringify(s1.seats.map((x) => x.name))}`);
+  assert.ok(s1.seats.some((x) => x.name === '甲'), '甲自己的名字还在（都来自同一份名册）');
+  assert.equal(t2.net.info().seat, 1, '座位不动（rename 只换显示名）');
+  assert.equal(t2.net.info().name, '小明', '自己那份 hello 也带新名回来（peer.name 更新）');
+  note('nui/34 renameWire 与端到端改名（名册/座位板/peer 名同步，座位不动）');
 });

@@ -16,8 +16,11 @@
 //   · 可移植层：零 node:、零 DOM、零时钟、零随机。socket 与"每标签页存储"都是注入进来的端口。
 import { createPeer } from '../netx/client.ts';
 import type { Peer } from '../netx/client.ts';
-import { encodeUp, PROTOCOL_ID } from '../netx/protocol.ts';
+import { encodeUp, normalizeRoomCode, PROTOCOL_ID, ROOM_CODE_ALPHABET } from '../netx/protocol.ts';
 import type { Move, Up } from '../netx/protocol.ts';
+// 房间码的定义与校验出自 netx/protocol.ts（服务端路由用同一份）；在这里转口给本目录的
+// lobby.ts 用 —— nst/04 钉着"页面侧只有本文件一个 netx 进口"，大厅不许自己再开一条。
+export { normalizeRoomCode, ROOM_CODE_ALPHABET };
 import { classify } from '../src/cards.ts';
 import type { Card } from '../src/cards.ts';
 import { priceOf } from '../src/engine/state.ts';
@@ -39,6 +42,20 @@ export type Link = 'idle' | 'open' | 'closed';
 // 页面侧唯一允许知道的协议标识：由 netplay 转手，main.ts 不 import netx/protocol.ts
 // （nst/04 把"webui 里只有 netplay.ts 一个 netx 进口"钉死了，多一条就是第二道墙的苗头）。
 export const WIRE_SUBPROTOCOL = PROTOCOL_ID;
+
+// —— 默认房间地址推导（M6）——
+// 从"页面自己的位置 + ?room= 房间码"推默认 ws 地址。校验用 normalizeRoomCode：query 里的码
+// 不合法就当没带（退回普通 / 地址），合法才拼 /r/CODE —— 页面侧与服务端路由是同一个定义，
+// 不会出现"页面拼了个 /r/ab0e、服务端当非法路径拒掉"的缝。
+// 端口兜底从 main.ts **传进来**而不是写死在这里：srv/05 钉着 main.ts 里必须有那个默认端口的
+// 字面量（'8790'）—— 字面量留在入口文件、推导逻辑留在可测的这层，两边的钉子都不松。
+// hostname 兜底只为 file:// 那种没有 hostname 的打开方式。
+export function roomUrlFrom(base: { hostname: string; port: string }, query: string, fallbackPort: string): string {
+  const host = base.hostname === '' ? '127.0.0.1' : base.hostname;
+  const port = base.port === '' ? fallbackPort : base.port;
+  const code = normalizeRoomCode((new URLSearchParams(query).get('room') ?? '').trim());
+  return code === null ? `ws://${host}:${port}` : `ws://${host}:${port}/r/${code}`;
+}
 
 // 渲染层递回来的一个"意图"要能变成协议里的一个"动作"。单机那套 Intent 里还有 settle / nextHand /
 // reset 三种是页面自己推进用的，联机模式下没有对应消息（结算权在服务器），所以这里收窄：
@@ -94,6 +111,14 @@ export type NetInfo = {
   // 服务端不认这份凭据（房间重启过、token 已过期、或座位已被别的连接占着）⇒ 上层应当改走 join。
   // 不在这里直接 join 是因为"发什么上行"归传输层（main.ts）决定，本层只负责把这件事说清楚。
   staleToken: boolean;
+  // hosted 桌况（table 下行的直读；auto 房间 = 零值）
+  hostSeat: number;
+  readySeats: number[];
+  waiting: boolean;
+  // 桌务操作的最新一条回执（not_host/not_ready/begin_late/flow_off/begin_ignored）。
+  // 这些拒绝在等待期走的是 error 而不是 reject，而提示行原本只吃 lastReject —— 不补这一路，
+  // 玩家点「准备/开始」会"点了没反应"（复审点名的 UX 死点）。
+  tableError: Reject | null;
 };
 
 type Saved = {
@@ -195,6 +220,9 @@ export function createNet(options: NetOptions) {
   // "这一条下行之后必须补一次全新入桌"——只允许被同一条下行触发一次，否则 hello 没回来就会反复重入桌
   let stalePendingJoin = false;
   let staleAutoJoined = false;
+  // 桌务回执：局外拒绝走 error（reject 的 hand 必须是真的局号），从 errors 流里挑这几个码
+  const TABLE_ERROR_CODES = new Set(['not_host', 'not_ready', 'begin_late', 'flow_off', 'begin_ignored']);
+  let tableError: Reject | null = null;
 
   function persist(): void {
     // 凭据刚被服务端判死 ⇒ 这一份不许再写回存储：onText 里先 del 后 persist，
@@ -276,6 +304,29 @@ export function createNet(options: NetOptions) {
       const up = peer.resume();
       return up === null ? null : encodeUp(up);
     },
+    // 显式离桌：把座位还回去（断开 ≠ 离桌，座位默认为重连保留）。与 joinWire 同一套清理：
+    // 凭据作废 + 换新身份，下一次连接就是全新入座，不会拿着旧 token 找一个已经不存在的座位。
+    // 消息本身不带字段 —— 服务端按连接认座（与 action 同一口径）。
+    leaveWire(): string {
+      options.store.del(savedKey(prefix));
+      peer.renew();
+      return encodeUp({ t: 'leave' });
+    },
+    // 桌务上行：准备（按当前桌况取反 = 准备/取消准备二合一）与房主的开局/续局（同一条 begin，
+    // 语义由房间所处阶段决定）。不走 act()：它们不是行动，停手不拦 —— 但被拒的回执照常上提示行。
+    ready(): string {
+      const i = peer.info();
+      const amReady = (i.table?.ready ?? []).includes(i.seat);
+      return encodeUp({ t: 'ready', on: !amReady });
+    },
+    begin(): string {
+      return encodeUp({ t: 'begin' });
+    },
+    // 改名：resume 不带名字（协议如此），所以"输入框改了名再重连"要补发这一条。
+    // 座位与凭据都不动；服务端刷新名册后，自己那份 hello 会把新名带回来（peer.name 随之更新）。
+    renameWire(name: string): string {
+      return encodeUp({ t: 'rename', name });
+    },
     // 服务端下行进来的一条文本：喂给那道墙，返回该回发上行的文本（份额、以及"该发什么"的决定）。
     onText(text: string): string[] {
       // 判据只认那道墙**通过 schema 校验之后**记进 `errors` 的东西。
@@ -292,6 +343,7 @@ export function createNet(options: NetOptions) {
         if (e.code === 'leak_blocked') leakBlocked = e;
         else if (e.code === 'replaced') replaced = e;
         // 凭据作废的两条回执：房间重启后 token 不认识 / 这个 token 名下的座位已被别的连接拿着。
+        else if (TABLE_ERROR_CODES.has(e.code)) tableError = e;
         else if (e.code === 'bad_token' || e.code === 'token_seat_mismatch') {
           staleToken = e;
           staleDeadToken = tokenBefore;
@@ -357,10 +409,14 @@ export function createNet(options: NetOptions) {
         notices: p.notices,
         hasToken: readSaved(options.store, prefix) !== null,
         staleToken: staleToken !== null,
+        hostSeat: p.table?.host ?? -1,
+        readySeats: p.table?.ready ?? [],
+        waiting: p.table?.waiting ?? false,
+        tableError,
       };
     },
     snapshot(): Snapshot {
-      return netSnapshot(peer, link, nameOfSeat, trustLines(), untrusted());
+      return netSnapshot(peer, link, nameOfSeat, trustLines(), untrusted(), tableError);
     },
   };
 }
@@ -377,6 +433,7 @@ function netSnapshot(
   nameOfSeat: (seat: number) => string,
   trust: string[],
   blocked: boolean,
+  tableErr: Reject | null,
 ): Snapshot {
   const info = peer.info();
   const view = peer.viewOf();
@@ -388,9 +445,60 @@ function netSnapshot(
   if (view === null || rules === null) {
     // 这一支正是房间还在 `collect`（等份额）的那段时间：局面还没有，可"为什么还没有"必须说得出。
     // 之前这里连 notices 都不给，页面在最需要解释的那一刻是完全静默的。
+    // hosted 等待期（table.waiting，严格 = 服务端 hand === null）也走这支：同一份 return 换上
+    // "座位板 + 准备/开始按钮 + 等待状态行"——不另开第三个 log 分支（nst/13 钉着恰好两条）。
+    const table = info.table;
+    const waiting = table !== null && table.waiting;
+    const waitSeats: SeatCell[] = waiting
+      ? peer.rosterOf().map((r) => ({
+          seat: r.seat,
+          name: r.name,
+          role: (r.seat === info.seat ? 'human' : 'remote') as SeatCell['role'],
+          marks: [r.seat === table.host ? '主' : '', table.ready.includes(r.seat) ? '✓' : ''].filter(Boolean).join(''),
+          chips: 0,
+          committed: 0,
+          looked: false,
+          active: false,
+          status: table.ready.includes(r.seat) ? '已准备' : '未准备',
+          cardsText: '',
+          tierText: '',
+          resultText: '',
+          hidden: true,
+          departed: false,
+        }))
+      : [];
+    // 「等 N/M 准备」由前端按桌况现拼（服务端只发排好序的 ready 列表，不拼文案）；
+    // N/M 只是展示口径，真正的门在服务端（not_ready 的回执会经 tableError 上屏）
+    const inRoom = peer.rosterOf().length;
+    const readyCount = table?.ready.length ?? 0;
+    const iAmHost = table?.host === info.seat;
+    const waitButtons: ButtonOption[] = waiting
+      ? [
+          {
+            intent: { kind: 'ready' },
+            text: (table?.ready ?? []).includes(info.seat) ? '取消准备' : '准备',
+            cost: null,
+            legal: true,
+          },
+          iAmHost
+            ? {
+                intent: { kind: 'begin' },
+                text:
+                  readyCount >= inRoom && inRoom >= 2
+                    ? '开始游戏'
+                    : `开始游戏（${String(readyCount)}/${String(inRoom)} 已准备）`,
+                cost: null,
+                legal: readyCount >= inRoom && inRoom >= 2,
+              }
+            : { intent: { kind: 'fold' }, text: '等待房主开始…', cost: null, legal: false },
+        ]
+      : [];
+    const waitStatus = waiting
+      ? `${connectionLine(state, info.name, null, info.seat)}｜等待中·${String(inRoom)} 人在座·${String(readyCount)} 已准备`
+      : connectionLine(state, info.name, null, info.seat);
     return {
       started: false,
-      status: connectionLine(state, info.name, null, info.seat),
+      status: waitStatus,
       handIndex: info.hand,
       pot: 0,
       stake: 0,
@@ -398,8 +506,8 @@ function netSnapshot(
       turn: -1,
       dealer: -1,
       humanSeat: info.seat,
-      seats: [],
-      buttons: [],
+      seats: waitSeats,
+      buttons: waitButtons,
       // 两条分支的日志上限必须同一条尺：主分支是 `.slice(-40)`，这里以前没有 ⇒ 一旦 notices 的
       // 窗口被抬高，collect 那一段就能突破上限（rev=11 应修 3，nst/13 把"两分支同上限 + notices ≤ 上限"钉成静态门）。
       log: [...trust, ...notices].slice(-40),
@@ -409,8 +517,9 @@ function netSnapshot(
       ledgerLine: '',
       total: 0,
       over: null,
-      note: bannerText(trust, info.lastReject),
+      note: bannerText(trust, tableErr, info.lastReject),
       dealerRule: '?',
+      hostPaused: false,
     };
   }
   const mySeat = info.seat;
@@ -528,6 +637,16 @@ function netSnapshot(
     .filter((x) => x.cards !== 'unknown')
     .map((x) => `${nameOfSeat(x.seat)} ${handAscii(x.cards as Card[])}`);
   const log = peer.logOf();
+  // 结算暂停（hosted 专属）：settle+揭示之后房间停在结算画面等房主「继续」。
+  // auto 房间收不到 table ⇒ info.table 为 null ⇒ hostPaused 恒 false，行为一个字节不变。
+  const hostPaused = view.phase === 'settled' && info.table !== null;
+  const finalButtons: ButtonOption[] = blocked
+    ? stoppedButtons()
+    : hostPaused
+      ? info.table?.host === mySeat
+        ? [{ intent: { kind: 'begin' }, text: '继续下一局', cost: null, legal: true }]
+        : [{ intent: { kind: 'fold' }, text: '等待房主继续…', cost: null, legal: false }]
+      : buttonRow(view, mySeat, nameOfSeat);
   return {
     started: true,
     status: `${connectionLine(state, info.name, view.phase, mySeat)}｜第 ${String(info.hand)} 手·${viewWord(view.phase)}`,
@@ -539,7 +658,7 @@ function netSnapshot(
     dealer: view.dealer,
     humanSeat: mySeat,
     seats: cells,
-    buttons: blocked ? stoppedButtons() : buttonRow(view, mySeat, nameOfSeat),
+    buttons: finalButtons,
     // 越界提示也要出现在日志区：note 只有一行标题位，而"停手 + 为什么停手"不许只活在测试里（工单 §4 M5）。
     log: [...trust, ...notices, ...log.map((e: Event) => logLineOf(nameOfSeat, e))].slice(-40),
     settlement,
@@ -552,16 +671,20 @@ function netSnapshot(
     // 与单机同一口径：tableTotal = 各家筹码 + 池（webmin/model.ts::tableTotal），两条路才能对同一个数
     total: cells.reduce((a, c) => a + (c.departed ? 0 : c.chips), 0) + view.pot,
     over: null,
-    note: bannerText(trust, info.lastReject),
+    note: bannerText(trust, tableErr, info.lastReject),
     dealerRule: DEALER_NEXT_LABELS[rules.dealer.next] ?? '?',
+    hostPaused,
   };
 }
 
 // 牌桌上那一条"警告位"（scene.ts 用 warn 色印在日志区标题上）。优先级：
 // 越界/漏牌/顶号这类信任问题 > 服务端这一次 reject 的原文。reject 必须可见（Q6=A2 ③：
 // 买不起之类后果由服务端送回来，UI 照实显示），但它是"这一下没成就完了"，不是整局不可信。
-function bannerText(trust: string[], reject: Reject | null): string | null {
+function bannerText(trust: string[], tableErr: Reject | null, reject: Reject | null): string | null {
   if (trust.length > 0) return trust[0] ?? null;
+  // 桌务回执排在 lastReject 前面：等待期的拒绝走 error（reject 的 hand 必须是真的局号），
+  // 不补这一路，玩家点「准备/开始」就是点了没反应（复审点名的 UX 死点）
+  if (tableErr !== null) return `桌务被拒：${tableErr.why}`;
   if (reject !== null) return `服务端拒绝：${reject.why}`;
   return null;
 }

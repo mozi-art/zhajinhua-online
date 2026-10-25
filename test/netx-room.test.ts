@@ -884,3 +884,184 @@ test('room/29 庄家那一座没交份额 ⇒ 剔除之后庄家必须挪到还�
   note(`room/29 庄家缺席 ⇒ 挪到座位${String(room.info().dealer)}、牌局开出来、进程没炸；缺席家筹码原样`);
 });
 
+
+test('room/30 显式离桌：局中被拒（leave_late）、局间离桌后座位释放、旧凭据作废、新玩家可入该座', () => {
+  const rig = createRig({ seats: 3 });
+  rig.join('甲');
+  rig.join('乙');
+  // ① 局中发起：那一座的筹码还押在当前一手里 ⇒ leave_late，座位原地不动
+  rig.up(0, { t: 'leave' });
+  assert.equal(rig.rejectOf(0)?.code, 'leave_late', '局中离桌必须被拒');
+  assert.equal(rig.info().connections.filter((c) => c.seat === rig.seatOf(0)).length, 1, '被拒后座位没丢');
+  // ② 局间离桌：结算之后发 ⇒ 成功，连接还在但不再持座
+  finishHand(rig);
+  const rejectsBefore = rig.peers[0]?.info().rejects.length ?? 0;
+  rig.up(0, { t: 'leave' });
+  assert.equal(rig.peers[0]?.info().rejects.length, rejectsBefore, '局间离桌不该产生新的拒绝（rejectOf 读的是历史，这里比增量）');
+  assert.equal(rig.info().connections.filter((c) => c.seat === rig.seatOf(0)).length, 0, '该连接已不持座');
+  assert.ok(rig.wireText('down').some((t) => t.includes('已离桌')), '离桌者要收到一条确认');
+  assert.ok(rig.wireText('down').some((t) => t.includes('离开 0 号位')), '全桌要看见谁走了');
+  // ③ 旧凭据作废：甲凭旧 token 重连 ⇒ bad_token（不是悄悄复活到原座）
+  rig.reconnect(0);
+  assert.ok(rig.peers[0]?.info().errors.some((e) => e.code === 'bad_token'), '离桌后的旧 token 必须是废纸');
+  // ④ 座位已还回去：新玩家入座拿到的是甲原来的那座
+  const idx = rig.join('丙');
+  assert.equal(rig.seatOf(idx), rig.seatOf(0), '释放的座位要能被新玩家拿走');
+  note('room/30 离桌：leave_late 档 / 局间成功 / token 作废 / 座位可复用');
+});
+
+test('room/31 死座清扫：不在场且筹码不足底注的座位在下一手开始前自动离桌；在场或有钱的一律保留', () => {
+  // 三家各 1/1/100 买入（minBuyIn=1）：无论谁赢，两个 1 买入家里必有一家输光（<底注 1）⇒
+  // 被清对象必然存在且与种子无关。断线但有钱的丙必须**不被**清（断线重连的权利不受这条影响）。
+  const rig = createRig({ seats: 3, minBuyIn: 1 });
+  rig.join('甲', 1);
+  rig.join('乙', 1);
+  rig.join('丙', 100);
+  finishHand(rig);
+  const broke = rig.info().chips.filter((row) => row.chips < 1).map((row) => row.seat);
+  assert.ok(broke.length >= 1, '构造前提：必有一家输光');
+  const victimSeat = broke[0] as number;
+  const victimIdx = rig.peers.findIndex((p) => p.info().seat === victimSeat);
+  assert.ok(victimIdx >= 0, '找到输光那一家的下标');
+  rig.drop(victimIdx); // 输光的那家断线（标签页关掉的真实形态）
+  rig.drop(2); // 有钱的丙也断线 —— 对照：他必须被保留
+  rig.clock.advance(6000); // 手间隙到点 ⇒ beginHand ⇒ 清扫
+  rig.settle();
+  assert.ok(rig.wireText('down').some((t) => t.includes('不在场且筹码不足底注，已自动离桌')), '清扫要说清楚依据');
+  assert.equal(rig.info().chips.some((row) => row.seat === victimSeat), false, '死座已出册');
+  assert.equal(rig.info().chips.some((row) => row.seat === rig.seatOf(2)), true, '断线但有钱的座位不许被清');
+  assert.equal(rig.info().over, null, '活着的两家照常开下一手（清扫不收桌）');
+  note(`room/31 清扫：座位${String(victimSeat)} 自动离桌，断线富座保留，房间继续`);
+});
+
+// —— M6 hosted 流程（等待 → 准备 → 房主开局 → 结算暂停 → 房主续局）——
+// 拒绝分档口径（proto/06 钉着 rejectSeat 字面量 vs NET_REJECT_CODES）：局内（hand 在）走
+// rejectSeat（not_host / begin_late，码在表里）；局外（hand === null）走 error（not_ready /
+// not_host / flow_off / begin_ignored，不进表）。errors 用 peer.info().errors 断言。
+const errOf = (rig: Rig, i: number, code: string): boolean =>
+  (rig.peers[i]?.info().errors ?? []).some((e) => e.code === code);
+
+test('room/32 hosted 基本流：准备门与房主门各有自己的档，结算停住不自动续，续局无需再准备', () => {
+  const rig = createRig({ seats: 3, flow: 'hosted' });
+  const a = rig.join('甲'); // 座位 0 = 在线最小号 = 房主
+  const b = rig.join('乙');
+  // ① 无人准备：房主 begin → not_ready（局外 error 档）
+  rig.up(a, { t: 'begin' });
+  assert.ok(errOf(rig, a, 'not_ready'), '没准备好就该被 not_ready 拦下');
+  // ② 非房主 begin → not_host（局外 error 档）
+  rig.up(b, { t: 'begin' });
+  assert.ok(errOf(rig, b, 'not_host'), '非房主点开始就该被 not_host 拦下');
+  // ③ 只有一家准备：仍 not_ready
+  rig.up(a, { t: 'ready', on: true });
+  rig.up(a, { t: 'begin' });
+  assert.ok(errOf(rig, a, 'not_ready'), '乙没准备，甲点了也开不了');
+  // ④ 全员准备 → 房主 begin → 开局（collect），table 广播 waiting=false
+  rig.up(b, { t: 'ready', on: true });
+  rig.up(a, { t: 'begin' });
+  assert.equal(rig.info().hand, 1, '准备齐了、房主点了，就该开局（rig 的 peers 会自动交份额，phase 可能已到 betting，故按局号断言）');
+  assert.ok(rig.wireText('down').some((t) => t.includes('"t":"table"')), '桌况要广播');
+  assert.equal(rig.peers[a]?.info().table?.waiting, false, '开局之后 waiting 必须翻 false');
+  // ⑤ 局中：房主 begin → begin_late（局内 reject 档，hand 是真的）
+  rig.up(a, { t: 'begin' });
+  assert.equal(rig.rejectOf(a)?.code, 'begin_late', '局中点继续该被 begin_late 拒（reject 档）');
+  // ⑥ 打完一手 → settled；**零待触发定时器**（auto 会挂 handGap 表，hosted 不挂 —— 这条是不再自动续局的硬门）
+  finishHand(rig);
+  assert.equal(rig.info().phase, 'settled');
+  assert.equal(rig.clock.pending(), 0, '结算后必须零定时器：挂着 handGap 表就等于还会自动续局');
+  // ⑦ 结算暂停期非房主点继续 → not_host（hand 还在 ⇒ reject 档）
+  rig.up(b, { t: 'begin' });
+  assert.equal(rig.rejectOf(b)?.code, 'not_host', '暂停期非房主点继续走 reject 档 not_host');
+  // ⑧ 房主继续 → 第 2 手，且**无需再准备**（ready 只守第一次开局）
+  rig.up(a, { t: 'begin' });
+  assert.equal(rig.info().hand, 2, '房主点了继续就该开第 2 手');
+  // ⑨ 对照：auto 房间对桌务上行一律 flow_off
+  const auto = createRig({ seats: 2 });
+  const x = auto.join('甲');
+  auto.join('乙'); // auto：人齐自动开局
+  assert.equal(auto.info().hand, 1, '对照前提：auto 房间已自动开局（peers 自动交份额，phase 可能已到 betting）');
+  auto.up(x, { t: 'ready', on: true });
+  auto.up(x, { t: 'begin' });
+  assert.ok(errOf(auto, x, 'flow_off'), 'auto 房间的 ready/begin 都该被 flow_off 挡下');
+  note('room/32 hosted：not_ready/not_host（局外 error 档）、begin_late/not_host（局内 reject 档）、结算零定时器、续局免准备、auto 对照 flow_off');
+});
+
+test('room/33 hosted 桌况：房主断线即让位、重连 catchup 立刻带回 table、collect 加入者不误入等待', () => {
+  const rig = createRig({ seats: 3, flow: 'hosted' });
+  const a = rig.join('甲');
+  const b = rig.join('乙');
+  rig.up(a, { t: 'ready', on: true });
+  rig.up(b, { t: 'ready', on: true });
+  // ① 房主（甲，座位 0）断线 → host 让位给乙（座位 1）
+  rig.drop(a);
+  assert.equal(rig.peers[b]?.info().table?.host, 1, '房主断线即刻让位（host 是在线最小号的派生值）');
+  // ② 只剩乙在线：即便大家都准备过，在线数不够 → not_ready（准备门只数在线座位）
+  rig.up(b, { t: 'begin' });
+  assert.ok(errOf(rig, b, 'not_ready'), '断线的人不该算进"全员准备"（门只数在线座位）');
+  // ③ 甲凭 token 重连 → catchup 立刻补 table（等待期正是 hand===null，这条最容易在提前 return 处丢）
+  rig.reconnect(a);
+  const tbl = rig.peers[a]?.info().table;
+  assert.ok(tbl !== null, '重连的第一批下行里必须有 table（否则不知道谁是房主、谁准备了）');
+  assert.equal(tbl?.waiting, true, '还在等待期');
+  assert.equal(tbl?.host, 0, '甲回来了，host 回到在线最小号 0');
+  assert.equal(rig.peers[b]?.info().table?.host, 0, '重连触发的桌况广播要让乙也看见 host 回来了');
+  // ④ 甲的准备标志跨断线仍在（重连不摘 readiness）→ 房主 begin 直接开局
+  rig.up(a, { t: 'begin' });
+  assert.equal(rig.info().hand, 1, '重连回来无需再准备，房主一点就开');
+  // ⑤ collect 阶段丙加入：他不该看到"准备/开始"（waiting 严格 = hand === null）
+  const c = rig.join('丙');
+  assert.equal(rig.peers[c]?.info().table?.waiting, false, 'collect 加入者的 waiting 必须是 false（局已开）');
+  note('room/33 让位/重连桌况/在线准备门/collect 加入者 waiting=false');
+});
+
+test('room/34 桌务边角：未入座 no_seat、离桌摘准备、收桌后 begin_ignored', () => {
+  const rig = createRig({ seats: 3, flow: 'hosted' });
+  const a = rig.join('甲');
+  const b = rig.join('乙');
+  // ① 未持座的连接发桌务 → no_seat（与 leave/nonce 同一道门）
+  rig.room.open('ghost');
+  rig.room.receiveText('ghost', '{"t":"ready","on":true}');
+  const ghostDown = rig.room.pending('ghost').map((m) => JSON.stringify(m)).join('');
+  assert.ok(ghostDown.includes('no_seat'), `未入座发 ready 该被 no_seat 挡，实得 ${ghostDown.slice(0, 80)}`);
+  // ② 离桌摘准备：乙准备后离桌 → 在线只剩甲 → 甲 begin → not_ready（乙的"已准备"不许再算数）
+  rig.up(a, { t: 'ready', on: true });
+  rig.up(b, { t: 'ready', on: true });
+  rig.up(b, { t: 'leave' });
+  rig.up(a, { t: 'begin' });
+  assert.ok(errOf(rig, a, 'not_ready'), '离桌的人不许占着"已准备"的名分卡住开局');
+  // ③ 新玩家入座拿到乙的旧座 → 全员（在线）准备 → 开局
+  const c = rig.join('丙');
+  rig.up(c, { t: 'ready', on: true });
+  rig.up(a, { t: 'begin' });
+  assert.equal(rig.info().hand, 1, '补齐后开局');
+  // ④ 打完、甲离桌 → 只剩丙付得起 → 丙（新房主）begin → beginHand 发现人不够 → 收桌；再点 → begin_ignored
+  finishHand(rig);
+  rig.up(a, { t: 'leave' });
+  rig.up(c, { t: 'begin' });
+  assert.ok(rig.info().over !== null, '人不够付底注，这一下把桌收了');
+  rig.up(c, { t: 'begin' });
+  assert.ok(errOf(rig, c, 'begin_ignored'), '收桌之后再点继续必须说得清楚（begin_ignored），不是静默');
+  note('room/34 no_seat 门 / 离桌摘准备 / 收桌 begin_ignored');
+});
+
+test('room/35 改名：座位与凭据不动、全桌名册刷新、局中也行；同名改名是幂等无操作', () => {
+  const rig = createRig({ seats: 3, flow: 'hosted' });
+  const a = rig.join('甲');
+  const b = rig.join('乙');
+  // 局中改名也行：名字不参与任何判定（纯展示面）
+  rig.up(a, { t: 'ready', on: true });
+  rig.up(b, { t: 'ready', on: true });
+  rig.up(a, { t: 'begin' });
+  rig.up(b, { t: 'rename', name: '小明' });
+  // 名册从 hello 来：甲那侧的 roster 应已更新（refreshRosters 重发了各家的 hello）
+  const roster = rig.peers[a]?.rosterOf() ?? [];
+  assert.ok(roster.some((r) => r.seat === rig.seatOf(b) && r.name === '小明'), `甲的名册里乙该已叫小明：${JSON.stringify(roster)}`);
+  assert.ok(rig.wireText('down').some((t) => t.includes('现在叫 小明')), '改名要说给全桌听（notice）');
+  // 同名改名：幂等，不再广播
+  const notesBefore = rig.wireText('down').filter((t) => t.includes('现在叫')).length;
+  rig.up(b, { t: 'rename', name: '小明' });
+  assert.equal(rig.wireText('down').filter((t) => t.includes('现在叫')).length, notesBefore, '同名改名不该再广播');
+  // 座位与凭据不动：token 没换、座位没挪
+  const tok = rig.peers[b]?.info().token;
+  assert.ok(tok !== '' && rig.seatOf(b) === 1, '座位与凭据原样');
+  note('room/35 rename：名册刷新 + notice + 幂等 + 座位凭据不动');
+});

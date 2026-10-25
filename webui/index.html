@@ -18,6 +18,7 @@
       #netUrl { width: 15em; }
       #netName { width: 7em; }
       header button { background: #2f6f4f; color: #eaf5ee; border: 1px solid #7fd6a8; border-radius: 5px; padding: 2px 10px; font: inherit; cursor: pointer; }
+      header a { color: #8fa398; }
       #hint { margin-left: auto; color: #8fa398; }
       /* 成组显隐：display:contents 让 label 仍然直接排在 header 这条 flex 里，收起时整组变 none */
       .solo-only, .online-only { display: contents; }
@@ -31,6 +32,7 @@
   <body class="mode-solo">
     <header>
       <h1>炸金花 · M3</h1>
+      <a id="lobbyLink" class="muted" href="./lobby.html">大厅</a>
       <label>模式 <select id="mode"><option value="solo" selected>单机</option><option value="online">联机</option></select></label>
       <span class="solo-only">
         <label>机器人 <select id="bots"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select></label>
@@ -41,8 +43,9 @@
       </span>
       <span class="online-only">
         <label>房间 <input id="netUrl" type="text" placeholder="ws://127.0.0.1:8790" /></label>
-        <label>名字 <input id="netName" type="text" placeholder="玩家" /></label>
+        <label>名字 <input id="netName" type="text" placeholder="留空自动起名" /></label>
         <button id="netBtn">连接</button>
+        <button id="leaveBtn">离桌</button>
       </span>
       <label>买入 <input id="buyIn" type="number" value="256" min="1" /></label>
       <span id="hint" class="muted">未开局</span>

@@ -9,7 +9,7 @@
 // 行动能不能发出去由 netplay/那道墙决定，规则对不对由服务端 reject 决定 —— 这里一个都不判。
 import { dispatch, drain, EMPTY_UI, snapshot, start } from './bridge.ts';
 import type { Snapshot, StartOptions, Ui } from './bridge.ts';
-import { createNet, toMove, WIRE_SUBPROTOCOL } from './netplay.ts';
+import { createNet, roomUrlFrom, ROOM_CODE_ALPHABET, toMove, WIRE_SUBPROTOCOL } from './netplay.ts';
 import type { Net, NetInfo, Store } from './netplay.ts';
 import { paint } from './paint.ts';
 import { buildScene, hitAt, TABLE_STYLE } from './scene.ts';
@@ -107,7 +107,7 @@ function currentSnapshot(): Snapshot {
   return snapshot(ui);
 }
 
-function openSocket(url: string): void {
+function openSocket(url: string, renameTo?: string): void {
   const ws = new WebSocket(url, WIRE_SUBPROTOCOL);
   sock = ws;
   ws.onopen = () => {
@@ -115,9 +115,14 @@ function openSocket(url: string): void {
     net.markOpen();
     retries = 0;
     linkNote = null;
-    // 有凭据就凭 token 回来（刷新 / 断线），没有才占一个新座
-    const wire = net.resumeWire() ?? net.joinWire();
-    ws.send(wire);
+    // 有凭据就凭 token 回来（刷新 / 断线），没有才占一个新座。
+    // resume 不带名字：输入框里的名字如果和会话里的不一样，就是玩家想改名 —— 补一条 rename
+    // （座位不动）。不补的话，改了名字再重连桌上一寸不变（真机实测撞出来的"没变化"）。
+    const wire = net.resumeWire();
+    ws.send(wire ?? net.joinWire());
+    if (wire !== null && renameTo !== undefined && renameTo !== '' && renameTo !== net.info().name) {
+      ws.send(net.renameWire(renameTo));
+    }
     render();
   };
   ws.onmessage = (ev: MessageEvent) => {
@@ -149,8 +154,24 @@ function openSocket(url: string): void {
   };
 }
 
+// 空名字的自动名：玩家-XXXX（XXXX 来自安全随机 + 房间码字母表）。牌桌上认人全靠名字，
+// 一桌人都叫"玩家"就分不清谁是谁；而**硬拦空名**在单机态是死路——联机控件组藏着、名字框
+// 根本看不见，切一次联机被拦一次（真机实测被抓出来的"进不去联机模式"）⇒ 改为起名放行。
+function autoName(): string {
+  const buf = new Uint8Array(4);
+  crypto.getRandomValues(buf);
+  let tail = '';
+  for (const b of buf) tail += ROOM_CODE_ALPHABET[b % ROOM_CODE_ALPHABET.length];
+  return `玩家-${tail}`;
+}
+
 function connect(opts: { url: string; name: string; buyIn: number }): string {
   disconnect();
+  if (opts.name === '') {
+    opts.name = autoName();
+    const box = el<HTMLInputElement>('netName');
+    if (box !== null) box.value = opts.name; // 回填：玩家看得见自己这回叫什么，下次可改
+  }
   if (typeof window.WebSocket !== 'function') return '这个浏览器没有 WebSocket';
   try {
     net = createNet({ name: opts.name, buyIn: opts.buyIn, entropy: browserEntropy, store: tabStore });
@@ -163,7 +184,7 @@ function connect(opts: { url: string; name: string; buyIn: number }): string {
   mode = 'online';
   syncModeControls();
   linkNote = `正在连 ${opts.url}…`;
-  openSocket(opts.url);
+  openSocket(opts.url, opts.name);
   render();
   return linkNote;
 }
@@ -208,10 +229,12 @@ function syncModeControls(): void {
 
 // 首屏就把默认房间地址填进连接框（工单 §4 M5："端口可配置，默认值写进 UI 连接输入框"）。
 // 地址按当前页面自己是从哪儿端出来的一起算：房间进程同时也端页面（netx/serve.ts）。
+// M6 起 ?room=房间码 会把默认地址指向那张码桌（大厅页/分享链接就是靠它直达）。
+// 端口字面量必须留在本文件（srv/05 钉着 main.ts 与进程横幅两处同说一个默认端口），推导在 netplay。
+const DEFAULT_PORT = '8790';
+
 function defaultRoomUrl(): string {
-  const host = window.location.hostname === '' ? '127.0.0.1' : window.location.hostname;
-  const port = window.location.port === '' ? '8790' : window.location.port;
-  return `ws://${host}:${port}`;
+  return roomUrlFrom({ hostname: window.location.hostname, port: window.location.port }, window.location.search, DEFAULT_PORT);
 }
 
 // ——————————————————————————— 渲染 ———————————————————————————
@@ -227,6 +250,9 @@ function armFlips(snap: Snapshot, now: number): void {
 }
 
 function hintText(snap: Snapshot): string {
+  // 连接层的话（连不上 / 断了 / 名字没填被拦 / 已离桌）优先于一切牌局文案 —— 哪怕页面此刻在单机态：
+  // 失败提示只在联机态显示的话，"切联机被拦"就成了一句谁也看不见的悄悄话（真机实测缺陷）。
+  if (linkNote !== null) return linkNote;
   if (mode === 'online') {
     const info = net === null ? null : net.info();
     if (info !== null && info.trustLines.length > 0) return info.trustLines.join(' ⏎ ');
@@ -270,6 +296,18 @@ function render(): void {
 function send(intent: Intent): string | null {
   if (mode === 'online') {
     if (net === null) return '还没连上房间';
+    // 桌务意图必须在 toMove 之前拦下：它们不是行动（toMove 会返回 null），走的是 netplay 的
+    // ready()/begin() 两条桌务上行；顺序写死，别让"联机模式没有这个动作"抢答。
+    if (intent.kind === 'ready' || intent.kind === 'begin') {
+      if (sock === null || sock.readyState !== 1) return '连接不在，稍后自动重连';
+      try {
+        sock.send(intent.kind === 'ready' ? net.ready() : net.begin());
+      } catch {
+        return '连接正在关闭，稍后再试';
+      }
+      render();
+      return null;
+    }
     const move = toMove(intent);
     if (move === null) return `联机模式没有"${intent.kind}"这个动作：结算与推进归服务端`;
     const r = net.act(move);
@@ -294,22 +332,65 @@ function boot(): void {
   });
   el<HTMLButtonElement>('netBtn')?.addEventListener('click', () => {
     // 同一个按钮：单机态下它是"连接"，联机态下它是"断开"（页面只有一行控件的竖向预算，见 ui3/04b）
-    linkNote =
-      mode === 'online'
-        ? (backToSolo(), '已断开，回到单机模式')
-        : connect({ url: txt('netUrl', defaultRoomUrl()), name: txt('netName', '玩家'), buyIn: Math.max(1, num('buyIn', 256)) });
+    if (mode === 'online') {
+      linkNote = (backToSolo(), '已断开，回到单机模式');
+    } else {
+      const msg = connect({ url: txt('netUrl', defaultRoomUrl()), name: txt('netName', ''), buyIn: Math.max(1, num('buyIn', 256)) });
+      linkNote = msg;
+    }
+    render();
+  });
+  // 离桌 ≠ 断开：断开只是掉线（座位保留、托管代打），离桌是把座位还回去（名册除名、凭据作废）。
+  // 只在连着的时候有意义；发完就走人，页面回单机。
+  // 连接中改名：名字框一变（回车或焦点离开触发 change）立即发 rename —— 座位不动、全桌名册刷新。
+  // 真机实测教训：只做"重连时改名"没人找得到（用户的自然动作就是改完框等它变），必须就地生效。
+  // 回车再挂一条 keydown 直发：个别 Webview 的"回车提交 change"不可靠（实测就没触发），双路保险；
+  // 服务端对同名改名幂等，两条路先后各发一次也不会有副作用。
+  const commitRename = (): void => {
+    const name = txt('netName', '');
+    if (mode !== 'online' || net === null || sock === null || sock.readyState !== 1) return; // 没连着：连接时自然会带上/自动改名
+    if (name === '' || name === net.info().name) return;
+    try {
+      sock.send(net.renameWire(name));
+    } catch {
+      // 连接正在关：这一次发不出去，重连路径会再补
+    }
+  };
+  el<HTMLInputElement>('netName')?.addEventListener('change', commitRename);
+  el<HTMLInputElement>('netName')?.addEventListener('keydown', (ev) => {
+    if ((ev as KeyboardEvent).key === 'Enter') commitRename();
+  });
+  el<HTMLButtonElement>('leaveBtn')?.addEventListener('click', () => {
+    if (mode !== 'online' || net === null || sock === null || sock.readyState !== 1) {
+      linkNote = '还没连上，谈不上离桌';
+      render();
+      return;
+    }
+    try {
+      sock.send(net.leaveWire());
+    } catch {
+      // 连接已经在关：这一发发不出去也没关系，本地凭据已在 leaveWire 里清掉
+    }
+    linkNote = (backToSolo(), '已离桌，回到单机模式');
     render();
   });
   el<HTMLSelectElement>('mode')?.addEventListener('change', (ev) => {
     const want = (ev.target as HTMLSelectElement).value === 'online' ? 'online' : 'solo';
     if (want === mode) return;
-    if (want === 'solo') backToSolo();
-    else
-      connect({
-        url: txt('netUrl', defaultRoomUrl()),
-        name: txt('netName', '玩家'),
-        buyIn: Math.max(1, num('buyIn', 256)),
-      });
+    if (want === 'solo') {
+      backToSolo();
+      return;
+    }
+    // connect 失败（典型：名字没填）时必须**说出来并把控件弹回去**——这条 return 值先前被丢掉，
+    // 现象就是"切了联机却毫无反应"，真机实测被当成"进不去联机模式"。
+    const msg = connect({
+      url: txt('netUrl', defaultRoomUrl()),
+      name: txt('netName', ''),
+      buyIn: Math.max(1, num('buyIn', 256)),
+    });
+    if (msg !== null) linkNote = msg;
+    syncModeControls(); // 失败时把下拉拨回单机；成功时 connect 自己已同步过，这里幂等
+    render();
   });
   canvas?.addEventListener('click', (ev) => {
     const box = canvas.getBoundingClientRect();
@@ -365,7 +446,7 @@ window.__zjh3 = {
   connect: (o) => {
     const msg = connect({
       url: o?.url ?? el<HTMLInputElement>('netUrl')?.value ?? defaultRoomUrl(),
-      name: o?.name ?? txt('netName', '玩家'),
+      name: o?.name ?? txt('netName', ''),
       buyIn: Math.max(1, o?.buyIn ?? num('buyIn', 256)),
     });
     linkNote = msg;

@@ -11,7 +11,8 @@ import { createPeer } from '../netx/client.ts';
 import type { Peer } from '../netx/client.ts';
 import { encodeUp, PROTOCOL_ID } from '../netx/protocol.ts';
 import type { Move, Up } from '../netx/protocol.ts';
-import { DEFAULT_ROOM_PORT, MIN_BUY_IN, ROOM_SEATS, startRoom } from '../netx/serve.ts';
+import { bannerLines, DEFAULT_HOST, DEFAULT_ROOM_PORT, lanAddresses, MIN_BUY_IN, parseRoomArgs, ROOM_SEATS, startRoom } from '../netx/serve.ts';
+import type { NetIfaces } from '../netx/serve.ts';
 import { redirectTarget, resolveStatic } from '../webmin/serve.ts';
 import { request } from 'node:http';
 import type { ServerResponse } from 'node:http';
@@ -420,4 +421,176 @@ test('srv/08 文件不存在回 404（不是 500），响应形状与 no-store �
   assert.match(ok.headers['content-type'] ?? '', /text\/html/);
   assert.match(ok.body, /<html/i);
   note(`srv/08 ENOENT 与 src 下不存在都 404（带原因、纯文本、no-store），对照组 /webui/index.html 仍 200`);
+});
+
+// —— M6：--host 参数解析（纯函数直测，比起子进程更快更确定）——
+test('srv/09 parseRoomArgs：位置端口不动、--host 任意位置不占端口位、坏端口/坏 host 各自的 token 不变', () => {
+  // 历史形态一条不動：`serve.ts 8790`、`serve.ts 0`（内核挑端口）、坏端口退出档
+  assert.deepEqual(parseRoomArgs(['8790']), { port: 8790, host: DEFAULT_HOST });
+  assert.deepEqual(parseRoomArgs(['0']), { port: 0, host: DEFAULT_HOST });
+  assert.deepEqual(parseRoomArgs(['abc']), { error: 'port', raw: 'abc' }, 'srv/04 的那个 token：bad port: abc');
+  assert.deepEqual(parseRoomArgs([]), { port: DEFAULT_ROOM_PORT, host: DEFAULT_HOST }, '缺省 = 默认端口 + 默认绑定');
+  assert.deepEqual(parseRoomArgs([], { PORT: '9001' }), { port: 9001, host: DEFAULT_HOST }, 'PORT 环境变量兜底');
+  // --host 在前 / 在后 / 与端口混排，同一个解；值不占端口位
+  assert.deepEqual(parseRoomArgs(['--host', '0.0.0.0', '9000']), { port: 9000, host: '0.0.0.0' });
+  assert.deepEqual(parseRoomArgs(['9000', '--host', '0.0.0.0']), { port: 9000, host: '0.0.0.0' });
+  assert.deepEqual(parseRoomArgs(['--host', '192.168.1.5', '0']), { port: 0, host: '192.168.1.5' });
+  // 具体地址合法：IPv6 字面量（含方括号）、主机名都收
+  assert.deepEqual(parseRoomArgs(['--host', '[::1]', '9000']), { port: 9000, host: '[::1]' });
+  assert.deepEqual(parseRoomArgs(['--host', 'poker.lan', '9000']), { port: 9000, host: 'poker.lan' });
+  // 坏 host：缺值（旗标收尾 / 值是下一个旗标）、带空格、以 - 开头、环境变量同档
+  assert.deepEqual(parseRoomArgs(['--host']), { error: 'host', raw: '--host' }, '缺值 ⇒ raw 印旗标本身');
+  assert.deepEqual(parseRoomArgs(['9000', '--host', '--verbose']), { error: 'host', raw: '--host' });
+  assert.deepEqual(parseRoomArgs(['9000', '--host', 'a b']), { error: 'host', raw: 'a b' });
+  assert.deepEqual(parseRoomArgs(['9000', '--host', '-x']), { error: 'host', raw: '-x' });
+  assert.deepEqual(parseRoomArgs([], { HOST: 'a b' }), { error: 'host', raw: 'a b' });
+  assert.deepEqual(parseRoomArgs([], { HOST: '0.0.0.0' }), { port: DEFAULT_ROOM_PORT, host: '0.0.0.0' });
+  // 命令行优先于环境变量；重复 --host 取最后一个
+  assert.deepEqual(parseRoomArgs(['--host', '192.168.1.5'], { HOST: '0.0.0.0' }), { port: DEFAULT_ROOM_PORT, host: '192.168.1.5' }, '命令行优先于环境变量');
+  assert.deepEqual(parseRoomArgs(['--host', '0.0.0.0', '--host', '192.168.1.5', '9000']), { port: 9000, host: '192.168.1.5' });
+  note(`srv/09 parseRoomArgs：端口位不动、--host 双向混排、坏值 token（bad host: <原样>）与 bad port: abc 各守各的档`);
+});
+
+// —— M6：局域网地址枚举与横幅分层（注入假网卡 ⇒ 与真机无关，双跑一致）——
+const FAKE_IFACES: NetIfaces = {
+  loopback: [{ family: 'IPv4', address: '127.0.0.1', internal: true }],
+  eth0: [
+    { family: 'IPv4', address: '192.168.1.5', internal: false },
+    { family: 'IPv6', address: 'fe80::1', internal: false },
+  ],
+  eth1: [{ family: 'IPv4', address: '10.0.0.3', internal: false }],
+  vdup: [{ family: 'IPv4', address: '10.0.0.3', internal: false }],
+};
+
+test('srv/10 lanAddresses 与 bannerLines：非 internal IPv4、排序去重；默认 host 横幅逐字不变，通配只追加行', async () => {
+  assert.deepEqual(lanAddresses(FAKE_IFACES, 8790), ['ws://10.0.0.3:8790', 'ws://192.168.1.5:8790'], 'internal/IPv6 剔除、跨网卡去重、码点序');
+  assert.deepEqual(lanAddresses({}, 8790), [], '没有网卡 ⇒ 空表（横幅另有说明行，不静默）');
+  // 默认 host：两行**逐字**等于 M5 的横幅（srv/03 的座位/买入文案、srv/06 的页面行都钉着它们）
+  const lonely = { wsUrl: 'ws://127.0.0.1:8790', uiUrl: 'http://127.0.0.1:8790/webui/', httpUrl: 'http://127.0.0.1:8790/', lanUrls: [] as string[] };
+  assert.deepEqual(bannerLines(lonely, '127.0.0.1'), [
+    '炸金花房间 · ws ws://127.0.0.1:8790 · 页面 http://127.0.0.1:8790/webui/ · 健康检查 http://127.0.0.1:8790/health',
+    `子协议 "${PROTOCOL_ID}"，座位 ${String(ROOM_SEATS)} 个，最低买入 ${String(MIN_BUY_IN)}。Ctrl+C 停；或输一行 quit 回车。`,
+  ], '默认 host 的横幅一个字节都不许变');
+  // 具体地址：不追加（用户点名了地址，前两行里的就是它）
+  assert.equal(bannerLines({ ...lonely, wsUrl: 'ws://192.168.1.5:8790', uiUrl: 'http://192.168.1.5:8790/webui/', httpUrl: 'http://192.168.1.5:8790/' }, '192.168.1.5').length, 2);
+  // 0.0.0.0：逐行追加可点地址；一枚举不到也要说一声
+  const wild = bannerLines({ wsUrl: 'ws://0.0.0.0:8790', uiUrl: 'http://0.0.0.0:8790/webui/', httpUrl: 'http://0.0.0.0:8790/', lanUrls: ['ws://10.0.0.3:8790', 'ws://192.168.1.5:8790'] }, '0.0.0.0');
+  assert.equal(wild.length, 4, '两行基础 + 两行局域网');
+  assert.equal(wild[2], '局域网 ws://10.0.0.3:8790（页面 http://10.0.0.3:8790/webui/）');
+  assert.equal(wild[3], '局域网 ws://192.168.1.5:8790（页面 http://192.168.1.5:8790/webui/）');
+  const none = bannerLines({ wsUrl: 'ws://0.0.0.0:8790', uiUrl: 'http://0.0.0.0:8790/webui/', httpUrl: 'http://0.0.0.0:8790/', lanUrls: [] }, '0.0.0.0');
+  assert.match(none[2] ?? '', /没枚举到任何局域网 IPv4 地址/, '空网卡要有说明行，不静默');
+  // IPv6 通配：不枚举地址（lanAddresses 只认 IPv4），但要说清"用具体 IPv6 访问"
+  const v6 = bannerLines({ wsUrl: 'ws://[::]:8790', uiUrl: 'http://[::]:8790/webui/', httpUrl: 'http://[::]:8790/', lanUrls: [] }, '::');
+  assert.equal(v6.length, 3);
+  assert.match(v6[2] ?? '', /IPv6 通配绑定：不枚举局域网地址/);
+  // startRoom 侧：注入网卡 ⇒ lanUrls 确定生成；0.0.0.0 绑定下 127.0.0.1 仍可访问（/health 照常）
+  const running = await watchdog(startRoom({ port: 0, host: '0.0.0.0', interfaces: () => FAKE_IFACES, static: false }), 'startRoom 0.0.0.0');
+  try {
+    assert.deepEqual(running.lanUrls, [`ws://10.0.0.3:${String(running.port)}`, `ws://192.168.1.5:${String(running.port)}`]);
+    assert.equal(running.wsUrl, `ws://0.0.0.0:${String(running.port)}`, 'wsUrl 照实印绑定面（srv/06 的 origin 语义不动）');
+    const health = await watchdog(fetch(`http://127.0.0.1:${String(running.port)}/health`), 'health');
+    assert.equal(health.status, 200);
+    assert.equal(((await health.json()) as { rooms: number }).rooms, 0);
+  } finally {
+    await watchdog(running.close(), 'close');
+  }
+  note('srv/10 局域网枚举（internal/IPv6 剔除、去重排序）+ 横幅四态（默认逐字不变/具体不追加/通配逐行/IPv6 说明行）');
+});
+
+test('srv/11 真子进程 --host：横幅印通配绑定、quit 干净退出；坏 host 退出码 2 且 token 原样', async () => {
+  // 通配绑定下的横幅会枚举**本机真网卡**（每台机器不同）⇒ 只钉"印出了 0.0.0.0 的监听行"与
+  // "干净退出"两件与机器无关的事，不把局域网行放进任何断言或 note（双跑一致的前提）。
+  const kid = runNode('netx/serve.ts', ['0', '--host', '0.0.0.0']);
+  try {
+    const line = await watchdog(kid.waitLine(/ws ws:\/\/0\.0\.0\.0:(\d+)/), '通配监听行');
+    assert.match(line, /^\d+$/, '横幅里要印出内核挑的真实端口');
+    const health = await watchdog(fetch(`http://127.0.0.1:${String(line)}/health`), 'health');
+    assert.equal(health.status, 200, '通配绑定下回环地址照样可达');
+    assert.equal(((await health.json()) as { protocol: string }).protocol, PROTOCOL_ID);
+  } finally {
+    kid.write('quit\n');
+    const code = await watchdog(kid.exited(), '子进程退出');
+    assert.equal(code, 0, `quit 之后退出码应为 0，实得 ${String(code)}（stderr=${kid.stderr}）`);
+    assert.match(kid.stdout, /已全部关闭/, '要说清楚是"关完了"才退的');
+  }
+  for (const [args, token] of [[[('--host')], 'bad host: --host'], [['--host', 'a b', '0'], 'bad host: a b']] as const) {
+    const bad = runNode('netx/serve.ts', [...args]);
+    const code = await watchdog(bad.exited(), '坏 host 子进程退出');
+    assert.equal(code, 2, `坏 host 该以 2 退出（${String(args.join(' '))}），实得 ${String(code)}`);
+    assert.ok(bad.stderr.includes(token), `stderr 要含 ${token}，实得 ${bad.stderr}`);
+  }
+  note('srv/11 --host 0.0.0.0 子进程：通配监听行 + 回环 /health 200 + quit 退出码 0；坏 host 退出码 2（token 原样）');
+});
+
+// M6 hosted 流程的产品路径端到端：startRoom({flow:'hosted'}) + 真 socket + 真那道墙。
+// 语义级断言（零定时器、拒绝分档）由 room/32-34 用 FakeClock 钉死，这里验的是"CLI 形状的栈也能走通全流程"。
+// 驱动纪律：跨 socket 的消息**没有顺序保证**（甲的 begin 可能赶在乙的 ready 之前被处理 ⇒ not_ready
+// 之后没人重试 ⇒ 整桌死等）—— 所以每个阶段都"消费下行直到条件成立，再发下一步"，绝不盲发。
+test('srv/12 startRoom 的 hosted 流程：准备 → 房主开始 → 打完一手 → 结算停住 → 房主续局', async () => {
+  const running = await watchdog(
+    startRoom({ port: 0, flow: 'hosted', turnMs: 250, nonceMs: 60000, settleMs: 60, handGapMs: 120 }),
+    'startRoom',
+  );
+  const clis: Cli[] = [];
+  // 消费一条连接的下行直到条件成立（有界轮次；到点抛错而不是挂死）
+  const until = async (cli: Cli, ok: () => boolean, what: string, rounds = 200): Promise<void> => {
+    for (let i = 0; i < rounds && !ok(); i += 1) await feed(cli, await cli.next());
+    assert.ok(ok(), `${what} 一直没成立`);
+  };
+  try {
+    for (const [i, name] of ['甲', '乙'].entries()) {
+      const peer = createPeer({ name, buyIn: MIN_BUY_IN, entropy: counterEntropy(0x7a00 + i) });
+      const cli = await watchdog(connect(running.wsUrl, name, peer), '握手');
+      clis.push(cli);
+      cli.send(peer.hello());
+    }
+    const a = clis[0] as Cli;
+    const b = clis[1] as Cli;
+    await until(a, () => a.peer.info().token !== '', '甲入座');
+    await until(b, () => b.peer.info().token !== '', '乙入座');
+    // 等待期：非房主点开始 → not_host（error 档，真 socket 上再验一次分档）
+    b.send({ t: 'begin' });
+    await until(b, () => b.peer.info().errors.some((e) => e.code === 'not_host'), '非房主 begin 被拒');
+    // 双准备：等到**双方都看见 ready 齐了**再让房主点开始（跨 socket 无序 ⇒ 盲发会 not_ready 死等）
+    a.send({ t: 'ready', on: true });
+    b.send({ t: 'ready', on: true });
+    await until(a, () => (a.peer.info().table?.ready.length ?? 0) >= 2, '双准备上桌况');
+    a.send({ t: 'begin' });
+    // 打完一手（同 srv/02 的驱动：轮到就亮牌跟注，直到双方都见 settled）
+    let settled = 0;
+    let steps = 0;
+    while (settled < clis.length && steps < 400) {
+      steps += 1;
+      for (const cli of clis) {
+        await feed(cli, await cli.next());
+        const move = playPolicy(cli.peer);
+        if (move !== null) cli.send({ t: 'action', hand: cli.peer.info().hand, move });
+        if (cli.peer.info().phase === 'settled') settled += 1;
+      }
+    }
+    assert.ok(settled >= 1, `${String(steps)} 步之后仍然没见到结算`);
+    for (const cli of clis) {
+      assert.deepEqual(cli.peer.info().violations, [], `${cli.label} 的墙抓到了越界`);
+      assert.equal(cli.peer.info().table?.waiting, false, '开局之后 waiting 必须是 false');
+    }
+    assert.equal(running.info().phase, 'settled', '结算后房间停在 settled（"不再自动续"的零定时器断言由 room/32 钉死）');
+    // 房主续局 → 第 2 手
+    a.send({ t: 'begin' });
+    let hand2 = false;
+    steps = 0;
+    while (!hand2 && steps < 200) {
+      steps += 1;
+      for (const cli of clis) {
+        await feed(cli, await cli.next());
+        if (cli.peer.info().hand >= 2) hand2 = true;
+      }
+    }
+    assert.ok(hand2, '房主点了继续，第 2 手就该开出来（无需再准备）');
+    assert.equal(running.info().fault, null);
+    note('srv/12 hosted 产品路径：not_host（error 档）→ 双准备 → 房主开始 → 整手 → settled 停住 → 续局到第 2 手');
+  } finally {
+    for (const cli of clis) cli.close();
+    await watchdog(running.close(), 'close');
+  }
 });

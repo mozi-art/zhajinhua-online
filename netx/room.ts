@@ -44,12 +44,17 @@ export type RoomOptions = {
   firstDealer: number;
   clock: Clock;
   entropy: () => string;
-  // §1 全押行把"最小买入 256×底注"划给房间层 ⇒ 这条门槛是可配置的旋钮，默认值就是 §1 的字面量。
+  // §1 全押行：最小买入 256×底注属房间层约束（引擎不管）⇒ 这条门槛是可配置的旋钮，默认值就是 §1 的字面量。
   minBuyIn?: number | undefined;
   turnMs?: number | undefined;
   nonceMs?: number | undefined;
   settleMs?: number | undefined;
   handGapMs?: number | undefined;
+  // 流程口径（默认 auto = M4/M5 的既有行为，逐字不变）：
+  //   auto   —— 人齐（≥players.min）即自动开局；结算后 handGapMs 到点自动开下一手。
+  //   hosted —— 雀魂友人房式：等待 → 各家「准备」→ 房主「开始」才开局；结算后停在结算画面，
+  //             房主「继续」才开下一手。房主 = 在线座位的最小号（派生，断线即让位）。
+  flow?: 'auto' | 'hosted' | undefined;
 };
 
 export type HandPhase = 'collect' | 'betting' | 'awaitingSettle' | 'settled';
@@ -57,6 +62,8 @@ export type HandPhase = 'collect' | 'betting' | 'awaitingSettle' | 'settled';
 export type RoomInfo = {
   hand: number;
   phase: HandPhase | 'idle';
+  // hosted 流程：true = 还没开过任何一手（等待/准备期）。auto 房间恒 false。
+  waiting: boolean;
   seated: number[];
   missing: string[];
   seq: number;
@@ -92,6 +99,7 @@ type Hand = {
 export function createRoom(options: RoomOptions) {
   const rules = options.rules ?? presets.classic;
   const clock = options.clock;
+  const flow = options.flow ?? 'auto';
   const turnMs = options.turnMs ?? 30000;
   const nonceMs = options.nonceMs ?? 15000;
   const settleMs = options.settleMs ?? 4000;
@@ -114,6 +122,9 @@ export function createRoom(options: RoomOptions) {
   const seatToken = new Map<number, string>();
   const joined = new Set<number>();
   const connected = new Set<number>();
+  // hosted 流程的准备名册（座位号）。只在等待期有意义；每次开局前清空。
+  // 断线座位的标志刻意不摘（重连还在），但"全员准备"的门只数在线座位 —— 走掉的人不许卡住开局。
+  const readiness = new Set<number>();
   const chips = new Map<number, number>();
   const names = new Map<number, string>(roster.map((r) => [r.seat, r.name]));
   const delivered = new Map<number, Mark>();
@@ -228,6 +239,29 @@ export function createRoom(options: RoomOptions) {
     drop(gapCancel);
     gapCancel = null;
     if (disposed || fault !== null || over !== null) return;
+    // 死座清扫：不在场（无活连接）且筹码已付不起底注的座位永远不会再参与任何一手，
+    // 留在名册里只会变成页面上的一排"离桌 筹码0"鬼影（真机实测成因：多个标签页各占一座、
+    // 标签页关掉后座位被托管自动跟注直到输光）。只在每手开始前清；**有活连接的、或还付得起
+    // 底注的一律保留** —— 断线重连的权利不受这条影响。
+    const gone: number[] = [];
+    for (const seat of [...joined].sort((a, b) => a - b)) {
+      if (connected.has(seat)) continue;
+      if ((chips.get(seat) ?? 0) >= rules.ante) continue;
+      joined.delete(seat);
+      chips.delete(seat);
+      readiness.delete(seat); // 走掉的人不许再占着"已准备"的名分（意见 #9）
+      const token = seatToken.get(seat);
+      if (token !== undefined) {
+        tokens.delete(token);
+        seatToken.delete(seat);
+      }
+      gone.push(seat);
+    }
+    if (gone.length > 0) {
+      note(`${gone.map((s) => `${String(s)} 号位`).join('、')} 不在场且筹码不足底注，已自动离桌`);
+      refreshRosters(-1);
+      broadcastTable();
+    }
     const eligible = roster
       .map((r) => r.seat)
       .filter((s) => joined.has(s) && (chips.get(s) ?? 0) >= rules.ante)
@@ -259,7 +293,9 @@ export function createRoom(options: RoomOptions) {
     };
     hand = h;
     for (const seat of connected) delivered.delete(seat);
+    if (flow === 'hosted') readiness.clear(); // 开局即作废准备名册：续局只看房主（用户口径），失败重开则重新准备
     sendCollect(h);
+    broadcastTable(); // waiting 从此为 false（哪怕因 nonce 不齐回到等待，playing 也已是 true）
     drop(nonceCancel);
     nonceCancel = clock.after(nonceMs, () => onNonceDeadline(index));
   }
@@ -286,8 +322,11 @@ export function createRoom(options: RoomOptions) {
     note(`${missing.join('、')} 没在 ${String(nonceMs)}ms 内提交份额，这一局不带它`);
     if (left.length < rules.players.min) {
       hand = null;
-      gapCancel = clock.after(handGapMs, beginHand);
+      // 流程分岔：auto 到点自动重开；hosted 回等待态等房主（不挂任何定时器 —— 挂了就会
+      // 绕过房主自己重开一局，准备流程形同虚设）。回等待后各家要重新准备。
+      if (flow === 'auto') gapCancel = clock.after(handGapMs, beginHand);
       note(`能开局的人不够（${String(left.length)} < ${String(rules.players.min)}），房间继续等待`);
+      broadcastTable();
       return;
     }
     // 庄家可能正是被剔掉的那一座 ⇒ 必须在发牌之前挪到还在桌的那一家（见 dealerAmong）
@@ -377,8 +416,12 @@ export function createRoom(options: RoomOptions) {
       publish(next);
       const msg = revealMsg(h);
       if (msg !== null) broadcast([msg]);
-      drop(gapCancel);
-      gapCancel = clock.after(handGapMs, beginHand);
+      // 流程分岔：auto 到点自动开下一手（M4/M5 行为）；hosted 停在结算画面等房主「继续」
+      // —— 不 arm gapCancel（room/32 用 clock.pending()===0 钉住"零待触发定时器"）。
+      if (flow === 'auto') {
+        drop(gapCancel);
+        gapCancel = clock.after(handGapMs, beginHand);
+      }
       return;
     }
     publish(next);
@@ -412,6 +455,9 @@ export function createRoom(options: RoomOptions) {
   // 如果没拿到承诺，局末的揭示就无从核对。
   // 若这一局已经在它缺席时结算完了，连揭示也一并补发 —— 审计材料不能因为断线就丢掉。
   function catchup(seat: number): void {
+    // 桌况补发必须先于 h===null 的提前 return：hosted 等待期正是"没有局"的时候，
+    // 而新连进来的/重连的人恰恰在这一刻最需要知道谁是房主、谁准备了（意见 #3）。
+    if (flow === 'hosted') queue(seat, [tableMsg()]);
     const h = hand;
     if (h === null) return;
     queue(seat, [
@@ -433,6 +479,99 @@ export function createRoom(options: RoomOptions) {
       if (seat === skip) return;
       queue(seat, [helloFor(seat)]);
     });
+  }
+
+  // —— hosted 流程的桌况面 ——
+  // 房主是**派生值**：在线（connected ∩ joined）座位的最小号。不存状态 ⇒ 断线即刻让位、
+  // 永远有人能点开始/继续；代价是原房主刷新回来可能已不是房主（口径写进 README）。
+  function hostOf(): number {
+    let host = -1;
+    for (const seat of connected) {
+      if (!joined.has(seat)) continue;
+      if (host < 0 || seat < host) host = seat;
+    }
+    return host;
+  }
+
+  function tableMsg(): Down {
+    return {
+      t: 'table',
+      host: hostOf(),
+      ready: [...readiness].sort((a, b) => a - b),
+      waiting: flow === 'hosted' && hand === null,
+      playing: nextHandIndex > 1,
+    };
+  }
+
+  // 桌况只在 hosted 房间广播（auto 房间的线上字节一个不许变）；入座/离桌/清扫/断线/
+  // 准备/开局都会改变 host 或 ready 或 waiting，各处就地调用。
+  function broadcastTable(): void {
+    if (flow !== 'hosted') return;
+    broadcast([tableMsg()]);
+  }
+
+  // 改名：座位与凭据都不动，只有显示名换。任何时候都行（名字不参与任何判定，纯展示面）。
+  // 全桌名册要刷新（hello 重发），不然别家的座位板还印着旧名 —— 与入座/重连同一条 refreshRosters 路。
+  function handleRename(seat: number, name: string): void {
+    const old = names.get(seat) ?? `座位${String(seat)}`;
+    if (name === old) return;
+    names.set(seat, name);
+    refreshRosters(-1);
+    note(`${old} 现在叫 ${name}`);
+  }
+
+  function handleReady(seat: number, on: boolean): void {
+    if (flow !== 'hosted') {
+      errorTo(seat, 'flow_off', 'this room starts hands automatically; ready/begin are meaningless here');
+      return;
+    }
+    if (on) readiness.add(seat);
+    else readiness.delete(seat);
+    broadcastTable();
+    note(`${names.get(seat) ?? `座位${String(seat)}`} ${on ? '已准备' : '取消了准备'}`);
+  }
+
+  // 拒绝分档（proto/06 的口径）：reject 的 hand 必须是真的局号 ⇒
+  //   局内（hand 在）：非房主 not_host、局中点继续 begin_late —— 走 rejectSeat，码进 NET_REJECT_CODES；
+  //   局外（hand === null）：not_ready / not_host / flow_off / begin_ignored —— 走 errorTo（code 任意 ASCII）。
+  function handleBegin(seat: number): void {
+    if (disposed || fault !== null || over !== null) {
+      errorTo(seat, 'begin_ignored', over !== null ? `room closed: ${over}` : fault !== null ? `room fault: ${fault}` : 'room is closing');
+      return;
+    }
+    if (flow !== 'hosted') {
+      errorTo(seat, 'flow_off', 'this room starts hands automatically; ready/begin are meaningless here');
+      return;
+    }
+    const h = hand;
+    if (hostOf() !== seat) {
+      const host = hostOf();
+      if (h !== null) rejectSeat(seat, h.index, 'not_host', `host is seat ${String(host < 0 ? -1 : host)}`);
+      else errorTo(seat, 'not_host', host < 0 ? 'nobody is online to host' : `host is seat ${String(host)}`);
+      return;
+    }
+    if (h === null) {
+      // 等待期：所有**在线**座位都准备了、且在线人数够最低开桌数，才开得了
+      const online = [...connected].filter((s) => joined.has(s)).sort((a, b) => a - b);
+      if (online.length < rules.players.min) {
+        errorTo(seat, 'not_ready', `need ${String(rules.players.min)} players online, have ${String(online.length)}`);
+        return;
+      }
+      const missing = online.filter((s) => !readiness.has(s));
+      if (missing.length > 0) {
+        errorTo(seat, 'not_ready', `${String(missing.length)} player(s) not ready yet`);
+        return;
+      }
+      beginHand();
+      note('房主开始了游戏');
+      return;
+    }
+    if (h.phase === 'settled') {
+      beginHand();
+      note('房主继续，开始下一手');
+      return;
+    }
+    rejectSeat(seat, h.index, 'begin_late', `hand ${String(h.index)} is in phase ${h.phase}`);
   }
 
   function join(id: string, up: Extract<Up, { t: 'join' }>): void {
@@ -468,8 +607,10 @@ export function createRoom(options: RoomOptions) {
     queue(free, [helloFor(free)]);
     catchup(free);
     refreshRosters(free);
+    broadcastTable(); // 新人入座可能改变房主（拿了更小的座位号），全桌的桌况要刷新
     note(`${up.name} 坐到 ${String(free)} 号位，带入 ${String(up.buyIn)}`);
-    if (started && hand === null && joined.size >= rules.players.min) beginHand();
+    // 流程分岔：auto 人齐即自动开局（M4/M5 行为）；hosted 等大家准备、房主开始
+    if (started && flow === 'auto' && hand === null && joined.size >= rules.players.min) beginHand();
   }
 
   function resume(id: string, up: Extract<Up, { t: 'resume' }>): void {
@@ -505,8 +646,44 @@ export function createRoom(options: RoomOptions) {
     // 名字，日志里的"→ 座位1"也读不出是谁），所以每次有人入座/重连，给在场的每一家重发一次自己的 hello。
     // 语义不变（同一条消息、同一份 schema），客户端处理 hello 是幂等的：seat/token 自己那份原样回来。
     refreshRosters(seat);
+    broadcastTable(); // 重连也会改变"在线座位"集合 ⇒ 房主可能易主，全桌要看见
     // 原来印的是「甲 号位重连」：有名字时座位号整个丢了（rev=10 复审应修 6 的 nit）。
     note(`${String(seat)} 号位（${names.get(seat) ?? '匿名'}）重连（hand=${String(up.hand)}, since=${String(up.since)}）`);
+  }
+
+  // 显式离桌：把座位还回房间。断开 ≠ 离桌 —— 座位为断线重连保留，但"我就是要走"必须有一条
+  // 干净的路（否则试连过一次的标签页会永远占着一座，被托管输光后变成清不掉的鬼影）。
+  // 局中不许走（那一座的承诺/筹码还押在当前一手里）⇒ leave_late；局与局之间随时可以。
+  function handleLeave(id: string): void {
+    const c = conns.get(id);
+    if (c === undefined) return;
+    const seat = c.seat;
+    if (seat === null) {
+      c.queue.push({ t: 'error', code: 'no_seat', why: 'join or resume first' });
+      return;
+    }
+    const h = hand;
+    // 只拦"还没结算的当前一手"：settle 之后到下一手之前的空档里，上一手的 seated 名单还挂在
+    // hand 上，但那一座的筹码早已分完 —— 那正是离桌的窗口，不许误拦。
+    if (h !== null && h.phase !== 'settled' && h.seated.includes(seat)) {
+      rejectSeat(seat, h.index, 'leave_late', `seat ${String(seat)} is dealt into hand ${String(h.index)}; leave between hands`);
+      return;
+    }
+    const who = names.get(seat) ?? `座位${String(seat)}`;
+    c.seat = null;
+    connected.delete(seat);
+    joined.delete(seat);
+    chips.delete(seat);
+    readiness.delete(seat); // 走掉的人不许占着"已准备"的名分（意见 #9）
+    const token = seatToken.get(seat);
+    if (token !== undefined) {
+      tokens.delete(token);
+      seatToken.delete(seat);
+    }
+    c.queue.push({ t: 'notice', text: `已离桌（${String(seat)} 号位）` });
+    refreshRosters(-1); // 在场的各家名册里从此没有这座
+    broadcastTable(); // 房主可能因此易主（离桌的是房主 ⇒ 让位给下一个在线座位）
+    note(`${who} 离开 ${String(seat)} 号位`);
   }
 
   function handleNonce(seat: number, up: Extract<Up, { t: 'nonce' }>): void {
@@ -567,7 +744,8 @@ export function createRoom(options: RoomOptions) {
   return {
     start(): void {
       started = true;
-      if (hand === null && joined.size >= rules.players.min) beginHand();
+      // 流程分岔：auto 人齐即开局；hosted 等准备与房主（begin 消息驱动）
+      if (flow === 'auto' && hand === null && joined.size >= rules.players.min) beginHand();
     },
     open(id: string): void {
       if (conns.has(id)) throw new TypeError(`dup connection id ${id}`);
@@ -576,8 +754,11 @@ export function createRoom(options: RoomOptions) {
     close(id: string): void {
       const c = conns.get(id);
       if (c === undefined) return;
+      const wasSeat = c.seat;
       if (c.seat !== null) connected.delete(c.seat);
       conns.delete(id);
+      // 断线不摘 readiness（重连还在），但它改变了"在线座位"集合 ⇒ hosted 房间房主可能易主
+      if (wasSeat !== null) broadcastTable();
     },
     receive(id: string, up: Up): void {
       const c = conns.get(id);
@@ -597,6 +778,22 @@ export function createRoom(options: RoomOptions) {
       const seat = c.seat;
       if (up.t === 'ping') {
         c.queue.push({ t: 'pong', echo: up.echo });
+        return;
+      }
+      if (up.t === 'leave') {
+        handleLeave(id);
+        return;
+      }
+      if (up.t === 'ready') {
+        handleReady(seat, up.on);
+        return;
+      }
+      if (up.t === 'begin') {
+        handleBegin(seat);
+        return;
+      }
+      if (up.t === 'rename') {
+        handleRename(seat, up.name);
         return;
       }
       if (up.t === 'nonce') {
@@ -647,6 +844,7 @@ export function createRoom(options: RoomOptions) {
       return {
         hand: hand?.index ?? 0,
         phase: hand?.phase ?? 'idle',
+        waiting: flow === 'hosted' && hand === null,
         seated: hand === null ? [] : [...hand.seated].sort((a, b) => a - b),
         missing: hand === null ? [] : missingParties(hand),
         seq: state?.seq ?? 0,

@@ -677,3 +677,138 @@ test('ui3/24 桌面中央的"亮牌"文本行：每张亮牌都在里面、字�
     }
   }
 });
+
+// —— M6 · 大厅页（lby 前缀与 nui/srv 分开，不挤别人的号段）——
+test('lby/01 大厅页模块图在静态服务策略下完整可达（镜像 nui/17 的走法，从 lobby.html 起步）', () => {
+  // lobby.ts 不 import netx（nst/04 盯着），它的房间码口径经 netplay.ts 转口 ——
+  // 所以这张图必须真的走到 netplay 与那道墙，否则"转口"是空话。
+  const joinRel = (fromRel: string, spec: string): string => {
+    const parts = fromRel.split('/').slice(0, -1);
+    for (const seg of spec.split('/')) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') parts.pop();
+      else parts.push(seg);
+    }
+    return parts.join('/');
+  };
+  const seen = new Set<string>();
+  const refused: string[] = [];
+  const queue: string[] = ['webui/lobby.html'];
+  while (queue.length > 0) {
+    const rel = queue.shift() as string;
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    const r = resolveStatic(`/${rel}`);
+    if (!r.ok) {
+      refused.push(`/${rel} ⇒ ${r.why}`);
+      continue;
+    }
+    const text = readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+    for (const m of text.matchAll(/<script\b[^\n]*?\bsrc="(\.[^"]+)"/g)) queue.push(joinRel(rel, m[1] as string));
+    for (const m of text.matchAll(/(?:^|\n)\s*(?:import|export)\b[^\n]*?from\s+'(\.[^']*)'|(?:^|\n)\s*import\s+'(\.[^']*)'/g)) {
+      queue.push(joinRel(rel, (m[1] ?? m[2]) as string));
+    }
+  }
+  assert.deepEqual(refused, [], `大厅模块图里有模块被静态服务拒掉，浏览器会整页起不来：\n${refused.join('\n')}`);
+  assert.ok(seen.has('webui/lobby.ts') && seen.has('webui/netplay.ts'), '图必须从大厅页走到 netplay（房间码转口在那儿）');
+  assert.ok(seen.has('netx/client.ts'), '图必须真的走到那道墙（经 netplay），否则大厅对码的校验是另一份实现');
+  assert.ok(seen.has('netx/protocol.ts'), '房间码的定义在 protocol.ts，必须在图里');
+  note(`lby/01 大厅模块图 ${String(seen.size)} 个文件全部可达，经 netplay 转口走到 protocol/client`);
+});
+
+test('lby/02 页面链接一律相对路径：lobby 与牌桌页在房间进程和 vite dev 两种宿主下都走得通', () => {
+  const lobby = readFileSync(new URL('../webui/lobby.html', import.meta.url), 'utf8');
+  const index = readFileSync(new URL('../webui/index.html', import.meta.url), 'utf8');
+  const linksOf = (html: string): string[] => [...html.matchAll(/(?:href|src)="([^"]*)"/g)].map((m) => m[1] as string);
+  for (const href of linksOf(lobby)) {
+    assert.ok(href.startsWith('./'), `大厅页的链接必须以 ./ 起步（vite dev 的根就是 webui/），实得 ${href}`);
+  }
+  assert.ok(linksOf(lobby).some((h) => /^\.\/index\.html\?room=/.test(h) || h === './index.html' || h.startsWith('./index.html')), '大厅要能回到牌桌页');
+  // 大厅运行期生成的链接（lobby.ts 里拼的）同一条纪律：不许绝对路径
+  const lobbyTs = readFileSync(new URL('../webui/lobby.ts', import.meta.url), 'utf8');
+  assert.match(lobbyTs, /index\.html\?room=/, '大厅进桌的链接形态必须是 ./index.html?room=CODE（query 会在 /webui/ 的 302 上丢，不能写 ./?room=）');
+  assert.ok(!lobbyTs.includes("'./?room="), "不许出现 ./?room= 这种会在 302 上丢 query 的写法");
+  // 牌桌页新增的大厅链接也走相对路径；被 srv/05 钉住的旧内容不许被动到
+  assert.ok(index.includes('href="./lobby.html"'), '牌桌页要有直达大厅的链接，且是相对路径');
+  assert.ok(linksOf(index).every((h) => h.startsWith('./')), `牌桌页所有链接必须相对路径，实得 ${linksOf(index).join(', ')}`);
+  note('lby/02 lobby/index 链接全部 ./ 相对；进桌统一 ./index.html?room=CODE（避开 /webui/ 302 丢 query）');
+});
+
+test('ui3/25 联机入口两个人因：空名字自动起名、离桌按钮走 leaveWire 且与断开并存', () => {
+  const html = readFileSync(new URL('../webui/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="leaveBtn"'), '联机控件组里要有「离桌」按钮');
+  assert.ok(html.includes('id="netBtn"'), '「连接/断开」仍在（离桌 ≠ 断开，两个动作并存）');
+  assert.ok(html.includes('placeholder="留空自动起名"'), '名字框的占位要说明空名的行为（自动起名，不是拦下）');
+  const main = stripped('webui/main.ts');
+  assert.match(main, /function autoName\(\)/, '空名字要自动起一个可区分的名字（玩家-XXXX）');
+  assert.match(main, /opts\.name = autoName\(\)/, 'connect 里空名走 autoName 并回填输入框（硬拦在单机态是死路：控件组藏着，名字框无处可填）');
+  assert.ok(!/txt\('netName', '玩家'\)/.test(main), '调用点不许再给名字兜底"玩家"');
+  assert.match(main, /leaveWire\(\)/, '离桌要走 netplay 的 leaveWire（清凭据 + 换身份 + 发 leave）');
+  assert.ok((main.match(/renameWire\(/g) ?? []).length >= 2, '改名要两条路都在：连接中改框即时发 + 重连时补发（只做一条用户就找不到另一条）');
+  assert.match(main, /addEventListener\('change'/, '名字框要有 change 监听（回车/失焦即改名）');
+  // 真机实测缺陷：名字门拦下连接时，"模式"下拉那条路的 return 值被丢掉 ⇒ 看起来"进不去联机模式"。
+  // 钉住两条入口都要把失败说出来（hint）并把焦点落到名字框。
+  assert.equal((main.match(/const msg = connect\(/g) ?? []).length, 3, '按钮 / 下拉 / 自动化钩子三条入口都要接住 connect 的返回消息（吞掉 = 看起来"进不去联机模式"）');
+  note('ui3/25 名字必填门 + 离桌按钮钉在源上（main.ts 恒 0 覆盖，与 srv/05 同口径）');
+});
+
+test('ui3/26 hosted 结算面板与桌务路由：不压板/牌/按钮、画布内、命中区在、main 先拦桌务、单机拒绝', () => {
+  // 构造一个 hosted 结算暂停形状的快照（两座亮牌 + 结算行 + 继续按钮 + hostPaused）
+  const cell = (seat: number, name: string, role: 'human' | 'remote', cards: string): import('../webmin/model.ts').SeatCell => ({
+    seat, name, role, marks: '', chips: 300, committed: 0, looked: true, active: false,
+    status: '局中', cardsText: cards, tierText: '单张', resultText: seat === 0 ? '赢 2' : '没赢',
+    hidden: false, departed: false,
+  });
+  const snap: Snapshot = {
+    started: true,
+    status: '联机·在线（甲）｜第 1 手·已结算',
+    handIndex: 1, pot: 0, stake: 1, phase: 'settled', turn: -1, dealer: 0, humanSeat: 0,
+    seats: [cell(0, '甲', 'human', '2S 4S 6S'), cell(1, '乙', 'remote', '3H 5H 7H')],
+    buttons: [{ intent: { kind: 'begin' }, text: '继续下一局', cost: null, legal: true }],
+    log: [],
+    settlement: ['结束原因：稳定终局（三家各满三次行动）', '甲[你]｜2S 4S 6S 单张｜赢 2（现筹码 300）', '乙[玩家]｜3H 5H 7H 单张｜没赢（现筹码 298）'],
+    settleSummary: ['甲 300'], revealedLine: '', ledgerLine: '甲=300 乙=298', total: 598,
+    over: null, note: null, dealerRule: '轮庄', hostPaused: true,
+  };
+  const sc = buildScene(snap, 960, 620, TABLE_STYLE);
+  // 面板恰好一块，用独立配色（panel + legal）—— 不与 ui3/20 的"panelSoft+accent 结算块"筛选相撞
+  const panels = sc.primitives.filter((p) => p.kind === 'rect' && p.fill === TABLE_STYLE.panel && p.stroke === TABLE_STYLE.legal);
+  assert.equal(panels.length, 1, `hostPaused 时应恰好一块居中面板，实得 ${String(panels.length)}`);
+  const pr = (panels[0] as Extract<typeof p0, { kind: 'rect' }>).rect;
+  const p0 = sc.primitives[0];
+  assert.ok(pr.x >= 0 && pr.y >= 0 && pr.x + pr.w <= 960 && pr.y + pr.h <= 620, `面板必须整块在画布内：${JSON.stringify(pr)}`);
+  for (const plate of sc.plates) assert.ok(!intersects(pr, plate), `面板压到了座位板：${JSON.stringify(plate)}`);
+  for (const hit of sc.hits) assert.ok(!intersects(pr, hit.rect), `面板压到了按钮命中区：${JSON.stringify(hit.rect)}`);
+  for (const f of faceRects(sc)) assert.ok(!intersects(pr, f), `面板压到了亮出来的牌：${JSON.stringify(f)}`);
+  // 按钮命中区存在且就是继续（画得出还要点得着）
+  assert.equal(sc.hits.length, 1, '恰好一个命中区');
+  assert.equal(sc.hits[0]?.intent.kind, 'begin');
+  // 面板文字不用 fg（避开 ui3/24 的居中文本收编口径）
+  const inPanel = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text' && p.align === 'center' && p.y >= pr.y && p.y <= pr.y + pr.h);
+  assert.ok(inPanel.length >= 2, '面板里至少有标题与提示两行');
+  for (const t of inPanel) assert.ok(t.color !== TABLE_STYLE.fg, `面板文字不该用 fg（ui3/24 口径）：${t.text}`);
+  // 对照：hostPaused=false（单机/auto 的 settled）不画面板
+  const sc2 = buildScene({ ...snap, hostPaused: false }, 960, 620, TABLE_STYLE);
+  assert.equal(sc2.primitives.filter((p) => p.kind === 'rect' && p.fill === TABLE_STYLE.panel && p.stroke === TABLE_STYLE.legal).length, 0, '不暂停就没有面板');
+  // 源钉：main.send 的桌务拦截必须先于 toMove（顺序错了 ready/begin 会被当成不认识的行动抢答）
+  const main = stripped('webui/main.ts');
+  const gateIdx = main.indexOf("intent.kind === 'ready' || intent.kind === 'begin'");
+  const moveIdx = main.indexOf('const move = toMove(intent)');
+  assert.ok(gateIdx >= 0 && moveIdx > gateIdx, '桌务拦截必须在 toMove 之前');
+  // 单机拒绝：bridge 的 dispatch 对 ready/begin 走引擎拒绝路径（unknown_intent，不抛）
+  const ui = start(EMPTY_UI, OPTS);
+  const after = drain(dispatch(ui, { kind: 'ready' }));
+  assert.ok(after.lastError !== null, `单机对 ready 该有拒绝说明，实得 ${String(after.lastError)}`);
+  const after2 = drain(dispatch(after, { kind: 'begin' }));
+  assert.ok(after2.lastError !== null, '单机对 begin 同样拒绝');
+  note('ui3/26 居中面板四不压（板/牌/按钮/画布）+ 命中区在 + 独立配色 + 桌务先拦后 toMove + 单机拒绝');
+});
+
+test('lby/03 大厅数据面：等待中/进行中标签 + 自动刷新，都来自 /rooms 的 waiting', () => {
+  const ts = readFileSync(new URL('../webui/lobby.ts', import.meta.url), 'utf8');
+  assert.ok(ts.includes('waiting: boolean'), 'RoomRow 要收下 /rooms 新增的 waiting 字段');
+  assert.ok(ts.includes("r.waiting ? '等待中' : '进行中'"), '列表行要有等待中/进行中的可读标签（不是裸 phase）');
+  assert.ok(ts.includes('setInterval'), '大厅要自动刷新（新开出的桌不该要求手动刷新）');
+  assert.ok(ts.includes("visibilityState === 'visible'"), '页面不可见时不刷（省无谓请求）');
+  note('lby/03 大厅：waiting 标签 + 5 秒自动刷新（可见时）');
+});

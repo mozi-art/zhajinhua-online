@@ -74,6 +74,7 @@ export type RigOptions = {
   handGapMs?: number;
   firstDealer?: number;
   minBuyIn?: number;
+  flow?: 'auto' | 'hosted';
 };
 
 export type Wire = { dir: 'up' | 'down'; index: number; text: string };
@@ -108,6 +109,7 @@ export function createRig(options: RigOptions = {}): Rig {
     clock,
     entropy: counterEntropy(),
     minBuyIn: options.minBuyIn,
+    flow: options.flow,
     turnMs: options.turnMs ?? 30000,
     nonceMs: options.nonceMs ?? 15000,
     settleMs: options.settleMs ?? 4000,

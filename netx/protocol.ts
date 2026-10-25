@@ -17,6 +17,27 @@ export const PROTOCOL_ID = 'zjh-m4-1';
 // 单条消息与单帧的硬上限：防止对端用一条巨帧把服务端内存吃掉。
 export const MAX_MESSAGE_BYTES = 1048576;
 
+// —— 房间码（多房间路由的共用定义）——
+// 4 位、31 字符字母表：A–Z 去掉易混的 O/I/L，加 2–9（没有 0/1）⇒ 31^4 ≈ 92 万个码，
+// 人念、手输都不会撞出歧义。放在 protocol.ts 这一层是因为两端都要用：服务端路由（netx/hub.ts
+// 的 /r/CODE）与页面侧（webui/netplay.ts 的 ?room=CODE 推导、lobby 的开桌摇码）。
+// 两处各写一份就会出现"页面放行、服务端拒收"的缝 —— 那是协议口径，不是实现细节。
+export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+export const ROOM_CODE_LEN = 4;
+
+// 小写输入归一化成大写；长度不是 4、或含字母表外字符（含 0/1/O/I/L、点、斜杠、空白）一律 null。
+// 大写化只发生在 ASCII 字母上（toUpperCase 与 locale 无关）；字母表本身不含会被本土化变形的字符。
+export function normalizeRoomCode(raw: string): string | null {
+  if (typeof raw !== 'string' || raw.length !== ROOM_CODE_LEN) return null;
+  let out = '';
+  for (const ch of raw) {
+    const up = ch.toUpperCase();
+    if (!ROOM_CODE_ALPHABET.includes(up)) return null;
+    out += up;
+  }
+  return out;
+}
+
 // —— 上行 ——
 export type Move =
   | { kind: 'look' }
@@ -30,6 +51,10 @@ export type Up =
   | { t: 'nonce'; hand: number; value: string }
   | { t: 'action'; hand: number; move: Move }
   | { t: 'resume'; token: string; hand: number; since: number }
+  | { t: 'leave' }
+  | { t: 'ready'; on: boolean }
+  | { t: 'begin' }
+  | { t: 'rename'; name: string }
   | { t: 'ping'; echo: number };
 
 // —— 下行 ——
@@ -42,6 +67,7 @@ export type Roster = { seat: number; name: string };
 
 export type Down =
   | { t: 'hello'; protocol: string; token: string; seat: number; name: string; rules: Rules; seats: Roster[] }
+  | { t: 'table'; host: number; ready: number[]; waiting: boolean; playing: boolean }
   | { t: 'commit'; hand: number; party: string; commit: string }
   | { t: 'collect'; hand: number; committed: string[]; missing: string[] }
   | { t: 'view'; hand: number; seq: number; view: View }
@@ -74,6 +100,11 @@ export const NET_REJECT_CODES = [
   'not_dealt',
   'bad_nonce',
   'nonce_late',
+  'leave_late',
+  // 下面两个只在"hand 还在"的档位经 rejectSeat 发出（proto/06 按源码扫字面量）：
+  // 局外（hand === null，典型是等待期）的同义拒绝走 errorTo，不进这张表。
+  'not_host',
+  'begin_late',
 ] as const;
 
 export type EngineRejectCode = (typeof ENGINE_REJECT_CODES)[number];
@@ -357,9 +388,32 @@ const UP_SPEC: Record<string, Spec> = {
     fields: {
       t: { kind: 'litStr', value: 'resume' },
       token: TOKEN_SPEC,
-      hand: { kind: 'int', min: 1, max: INT_MAX },
+      // hand=0 = 等待期重连（hosted 流程还没开过局，没有局号可用；此时 since 恒 0）
+      hand: { kind: 'int', min: 0, max: INT_MAX },
       since: { kind: 'int', min: 0, max: INT_MAX },
     },
+  },
+  // 显式离桌：把座位还回房间。不带任何字段 —— 座位由连接绑定（与 action 同一口径），
+  // 在局中发起会被拒（leave_late），只有局与局之间允许。
+  leave: {
+    kind: 'obj',
+    fields: { t: { kind: 'litStr', value: 'leave' } },
+  },
+  // 桌务：准备（on=false 取消）/ 房主开局与续局（同一条 begin，按房间所处阶段分义）。
+  // 都不带字段 —— 座位由连接绑定；发这些的必须是持座连接（未入座由 no_seat 门挡）。
+  ready: {
+    kind: 'obj',
+    fields: { t: { kind: 'litStr', value: 'ready' }, on: { kind: 'bool' } },
+  },
+  begin: {
+    kind: 'obj',
+    fields: { t: { kind: 'litStr', value: 'begin' } },
+  },
+  // 改名：名字只在入座（join）那一刻随消息发过一次；此后 resume 不带名字 ⇒ 输入框里改了名
+  // 重连也换不掉。rename 补上这条路：座位不动，全桌名册刷新。规格与 join.name 同一把尺。
+  rename: {
+    kind: 'obj',
+    fields: { t: { kind: 'litStr', value: 'rename' }, name: { kind: 'str', minLen: 1, maxLen: 24 } },
   },
   ping: {
     kind: 'obj',
@@ -378,6 +432,20 @@ const DOWN_SPEC: Record<string, Spec> = {
       name: { kind: 'str', minLen: 1, maxLen: 24 },
       rules: { kind: 'rules' },
       seats: { kind: 'arr', of: ROSTER_SPEC, maxLen: 64 },
+    },
+  },
+  // 桌况（hosted 流程的状态面）：谁是房主（-1 = 无人在线）、哪些座已准备（升序）、
+  // 是否在等待开局（严格 = hosted 且 hand === null）、是否已开过局。
+  // 刻意是独立消息而不是给 hello 加字段：hello 的字段面被 proto 样例与既有用例钉死，
+  // table 只在桌况变化时广播 + 重连补发，客户端按消息更新即可。
+  table: {
+    kind: 'obj',
+    fields: {
+      t: { kind: 'litStr', value: 'table' },
+      host: { kind: 'int', min: -1, max: 63 },
+      ready: { kind: 'arr', of: { kind: 'int', min: 0, max: 63 }, maxLen: 64 },
+      waiting: { kind: 'bool' },
+      playing: { kind: 'bool' },
     },
   },
   commit: {
