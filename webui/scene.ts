@@ -228,7 +228,7 @@ export const TOTAL_LABEL = '在场筹码+池';
 // 桌前筹码堆：1 枚筹码 = 1 个当前注级（口径声明在 ui3/32）。
 // committed 里混着底注与明牌加倍等成分，用"当前注级"折算是唯一的统一单位；
 // 封顶 8 枚是视觉口径（超过部分不再堆高，数字仍以座位板「投入」为准）。
-export const CHIP = { rx: 11, ry: 5.5, max: 8, gap: 4 };
+export const CHIP = { rx: 16, ry: 8, max: 8, gap: 5 }; // M-UI5：德州式大筹码（宽椭圆 + 边圈 + 中心面）
 
 export function chipStackCount(committed: number, stake: number): number {
   if (committed <= 0 || stake <= 0) return 0;
@@ -584,30 +584,19 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const tEdgeX = ux !== 0 ? box.w / 2 / Math.abs(ux) : Infinity;
     const tEdgeY = uy !== 0 ? box.h / 2 / Math.abs(uy) : Infinity;
     const tEdge = Math.min(tEdgeX, tEdgeY);
-    const baseX = box.x + box.w / 2 + ux * (tEdge + 16);
-    const baseY = box.y + box.h / 2 + uy * (tEdge + 16);
+    const baseX = box.x + box.w / 2 + ux * (tEdge + 26);
+    const baseY = box.y + box.h / 2 + uy * (tEdge + 26);
     for (let j = 0; j < count; j += 1) {
       const col = j % 2 === 0 ? st.accent : st.cardRed;
       const jx = (((j * 31) % 5) - 2) * 0.8;
-      primitives.push({
-        kind: 'ellipse',
-        cx: baseX + jx,
-        cy: baseY - j * CHIP.gap,
-        rx: CHIP.rx,
-        ry: CHIP.ry,
-        fill: j % 2 === 0 ? shade(col, 0.15) : col,
-        stroke: withAlpha(shade(col, -0.4), 0.9),
-      });
-      // 筹码内环：一道细边读出"筹码边缘的凹槽"（斗地主的筹码都是带边圈的）
-      primitives.push({
-        kind: 'ellipse',
-        cx: baseX + jx,
-        cy: baseY - j * CHIP.gap,
-        rx: Math.max(2, CHIP.rx - 3.5),
-        ry: Math.max(1, CHIP.ry - 1.8),
-        fill: 'transparent',
-        stroke: withAlpha(shade(col, -0.25), 0.75),
-      });
+      const ccx = baseX + jx;
+      const ccy = baseY - j * CHIP.gap;
+      // 德州式筹码四层（M-UI5）：暗色外缘（厚边）→ 彩色本体 → 白色边圈（真筹码的边缘色块）→ 中心面。
+      // 全部从主题令牌派生（accent/cardRed/cardFace + shade），不引入新调色板。
+      primitives.push({ kind: 'ellipse', cx: ccx, cy: ccy, rx: CHIP.rx, ry: CHIP.ry, fill: shade(col, -0.5), stroke: withAlpha(shade(col, -0.65), 0.95) });
+      primitives.push({ kind: 'ellipse', cx: ccx, cy: ccy, rx: CHIP.rx - 2, ry: CHIP.ry - 1.2, fill: col, stroke: null });
+      primitives.push({ kind: 'ellipse', cx: ccx, cy: ccy, rx: CHIP.rx - 5.5, ry: CHIP.ry - 2.6, fill: 'transparent', stroke: withAlpha(st.cardFace, 0.85) });
+      primitives.push({ kind: 'ellipse', cx: ccx, cy: ccy, rx: CHIP.rx / 2.8, ry: CHIP.ry / 2.8, fill: shade(col, 0.3), stroke: null });
     }
     if (fly !== undefined) {
       const toX = baseX;
@@ -616,15 +605,11 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
         const raw = (anim.now - fly.since - f * 60) / 420;
         if (raw <= 0 || raw >= 1) continue;
         const e = easeOutCubic(raw);
-        primitives.push({
-          kind: 'ellipse',
-          cx: box.x + box.w / 2 + (toX - (box.x + box.w / 2)) * e,
-          cy: box.y + box.h / 2 + (toY - (box.y + box.h / 2)) * e - Math.sin(e * Math.PI) * 16,
-          rx: CHIP.rx,
-          ry: CHIP.ry,
-          fill: shade(st.accent, 0.15),
-          stroke: withAlpha(shade(st.accent, -0.4), 0.9),
-        });
+        const fx = box.x + box.w / 2 + (toX - (box.x + box.w / 2)) * e;
+        const fy = box.y + box.h / 2 + (toY - (box.y + box.h / 2)) * e - Math.sin(e * Math.PI) * 16;
+        primitives.push({ kind: 'ellipse', cx: fx, cy: fy, rx: CHIP.rx, ry: CHIP.ry, fill: shade(st.accent, -0.5), stroke: withAlpha(shade(st.accent, -0.65), 0.95) });
+        primitives.push({ kind: 'ellipse', cx: fx, cy: fy, rx: CHIP.rx - 2, ry: CHIP.ry - 1.2, fill: st.accent, stroke: null });
+        primitives.push({ kind: 'ellipse', cx: fx, cy: fy, rx: CHIP.rx - 5.5, ry: CHIP.ry - 2.6, fill: 'transparent', stroke: withAlpha(st.cardFace, 0.85) });
       }
     }
   }
@@ -830,9 +815,9 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     primitives.push({ kind: 'rect', rect: { x: panel.x + 10, y: panel.y + 5, w: panel.w - 20, h: 2 }, fill: withAlpha(st.accent, 0.6), stroke: null, radius: 1 });
     primitives.push({ kind: 'rect', rect: { x: panel.x + 1, y: panel.y + 8, w: 2, h: 10 }, fill: withAlpha(st.accent, 0.8), stroke: null, radius: 1 });
     settle.forEach((line, i) => {
-      primitives.push(text(panel.x + 10, panel.y + 20 + i * st.rowH, line, st, { size: fitSize(line, panel.w - 20, 12), color: st.fg }));
+      primitives.push(text(panel.x + 10, panel.y + 20 + i * st.rowH, line, st, { size: fitSize(line, panel.w - 20, 13), color: st.fg }));
     });
-    primitives.push(text(panel.x + panel.w - 10, panel.y + 20 + settle.length * st.rowH, ledgerLine, st, { size: fitSize(ledgerLine, panel.w - 20, 12), color: st.dim, align: 'right' }));
+    primitives.push(text(panel.x + panel.w - 10, panel.y + 20 + settle.length * st.rowH, ledgerLine, st, { size: fitSize(ledgerLine, panel.w - 20, 13), color: st.dim, align: 'right' }));
   } else {
     // 行动日志底衬：一块半透明圆角面板 + 顶沿金线，把日志从"散字"收成一条信息栏
     primitives.push({ kind: 'rect', rect: { x: st.pad, y: stripTop, w: w - st.pad * 2, h: stripLines * st.rowH + 22 }, fill: withAlpha(st.panel, 0.62), stroke: withAlpha(st.dim, 0.18), radius: 8 });
@@ -910,18 +895,24 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const iAmHost = snap.buttons.some((b) => b.intent.kind === 'begin' && b.legal);
     const lines: string[] = ['本局结算', ...snap.settlement];
     lines.push(iAmHost ? '点「继续下一局」开下一手' : '等待房主继续…');
-    const lineH = st.rowH;
-    const pw = Math.min(Math.floor(w * 0.64), 520);
-    const ph = Math.min(lines.length * lineH + st.pad * 3, Math.floor(h * 0.42));
+    // M-UI5 加大：面板更宽（0.72w 上限 640）、行距 22、标题 16 —— 结算要像"开奖海报"不像一行小字。
+    // 纵向仍受座位环约束：面板整体夹在"顶排座位下沿"与"本人板上沿"之间的空档里（ui3/26 的口径）。
+    const lineH = st.rowH + 4;
+    const pw = Math.min(Math.floor(w * 0.72), 640);
+    const bandTop = ring.y + (n - 1 >= 1 ? OPP_PLATE.h + BAND_GAP : 8);
+    const bandBottom = (plates[0] as Rect).y - 10;
+    const bandH = Math.max(120, bandBottom - bandTop);
+    const ph = Math.min(lines.length * lineH + st.pad * 3 + 16, bandH, Math.floor(h * 0.62));
     const px = Math.floor(w / 2 - pw / 2);
-    const py = Math.floor(h * 0.3 + (h * 0.42 - ph) / 2);
-    primitives.push({ kind: 'rect', rect: { x: px, y: py, w: pw, h: ph }, fill: st.panel, stroke: st.legal, radius: 10 });
+    const py = Math.floor(bandTop + (bandH - ph) / 2);
+    primitives.push({ kind: 'rect', rect: { x: px, y: py, w: pw, h: ph }, fill: st.panel, stroke: st.legal, radius: 12 });
     // 喜庆化（M-UI3）：红内框（红金是"开奖"的配色语义，色值全来自令牌）+ 顶沿金线保留
-    primitives.push({ kind: 'rect', rect: { x: px + 4, y: py + 4, w: pw - 8, h: ph - 8 }, fill: 'transparent', stroke: withAlpha(st.cardRed, 0.55), radius: 8 });
+    primitives.push({ kind: 'rect', rect: { x: px + 5, y: py + 5, w: pw - 10, h: ph - 10 }, fill: 'transparent', stroke: withAlpha(st.cardRed, 0.55), radius: 9 });
     primitives.push({ kind: 'rect', rect: { x: px + 12, y: py + 5, w: pw - 24, h: 2 }, fill: withAlpha(st.accent, 0.6), stroke: null, radius: 1 });
-    const visible = Math.max(1, Math.floor((ph - st.pad * 2) / lineH));
-    // 头衔舱：标题坐进一块金底深字的小胶囊（与行动钮同一套金），面板立刻有"奖状"的仪式感
-    primitives.push({ kind: 'rect', rect: { x: px + pw / 2 - 52, y: py + 6, w: 104, h: 20 }, fill: st.accent, stroke: shade(st.accent, -0.45), radius: 10 });
+    const visible = Math.max(1, Math.floor((ph - 56) / lineH) + 1);
+    // 头衔舱：标题坐进一块金底深字的胶囊（与行动钮同一套金），面板立刻有"奖状"的仪式感
+    // 基线口径：标题 baseline = 舱底(py+32) 内收 7 ⇒ 视觉居中；内容行从舱下 16px 起按 lineH 排。
+    primitives.push({ kind: 'rect', rect: { x: px + pw / 2 - 64, y: py + 8, w: 128, h: 24 }, fill: st.accent, stroke: shade(st.accent, -0.45), radius: 12 });
     lines.slice(0, visible).forEach((line, i) => {
       const isTitle = i === 0;
       const isHint = i === Math.min(lines.length, visible) - 1;
@@ -934,9 +925,10 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
           : isHint
             ? (iAmHost ? st.legal : st.warn)
             : st.dim;
+      const baseline = isTitle ? py + 25 : py + 48 + (i - 1) * lineH;
       primitives.push(
-        text(px + pw / 2, py + st.pad * 1.5 + i * lineH + 6, line, st, {
-          size: isTitle ? 13 : 12,
+        text(px + pw / 2, baseline, line, st, {
+          size: isTitle ? 16 : 13,
           bold: isTitle || isWinner,
           color,
           align: 'center',

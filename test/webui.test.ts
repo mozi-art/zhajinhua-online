@@ -7,7 +7,7 @@ import { test, note } from './harness.ts';
 import { stateHash } from '../src/engine/state.ts';
 import { EMPTY_UI, dispatch, drain, snapshot, start } from '../webui/bridge.ts';
 import type { Snapshot, StartOptions } from '../webui/bridge.ts';
-import { buildScene, chipStackCount, hitAt, IDLE_ANIM, INK_STYLE, PAPER_STYLE, statusBubbleInk, TABLE_STYLE } from '../webui/scene.ts';
+import { buildScene, CHIP, chipStackCount, hitAt, IDLE_ANIM, INK_STYLE, PAPER_STYLE, statusBubbleInk, TABLE_STYLE } from '../webui/scene.ts';
 import type { Hit, Rect } from '../webui/scene.ts';
 import { paint } from '../webui/paint.ts';
 import { act, createSession, handText, intentOptions } from '../webmin/model.ts';
@@ -1071,7 +1071,7 @@ test('ui3/39 桌前筹码：枚数=投入÷注级（封顶8）、堆位朝桌心
   // ② 开局（各家已下底注）⇒ 每家都有筹码堆
   const snap = snapshot(opened({ bots: 2 }));
   const sc = buildScene(snap, 960, 620, TABLE_STYLE);
-  const chipEllipses = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && Math.abs(p.rx - 11) < 0.01);
+  const chipEllipses = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && Math.abs(p.rx - CHIP.rx) < 0.01);
   assert.ok(chipEllipses.length >= 3, '开局至少三家各有筹码堆');
   for (const c of chipEllipses) {
     assert.ok(c.cx >= 0 && c.cy >= 0 && c.cx <= sc.width + 1 && c.cy <= sc.height + 1, `筹码画出画布 (${String(c.cx)},${String(c.cy)})`);
@@ -1097,7 +1097,7 @@ test('ui3/39 桌前筹码：枚数=投入÷注级（封顶8）、堆位朝桌心
   assert.equal(JSON.stringify(withChips(since + 2000)), JSON.stringify(plain), '落定后不应再画飞行筹码');
   const mid = withChips(since + 300);
   assert.notEqual(JSON.stringify(mid), JSON.stringify(plain), '飞行中应当多出筹码图元');
-  const midChips = mid.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && Math.abs(p.rx - 11) < 0.01);
+  const midChips = mid.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && Math.abs(p.rx - CHIP.rx) < 0.01);
   assert.ok(midChips.length === chipEllipses.length + 2, '飞行中应恰好多出 2 枚在途筹码');
 });
 
@@ -1228,7 +1228,7 @@ test('ui3/42 控件动效与命中区（M-UI3）：命中 44px 高、互不重�
   assert.equal(panels.length, 1, '喜庆化不许破坏 ui3/26 的"恰一块面板"口径');
   const reds = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.stroke !== null && typeof p.stroke === 'string' && p.stroke.startsWith('rgba(') && p.fill === 'transparent' && p.rect.h > 40);
   assert.ok(reds.length >= 1, '面板要有红内框（喜庆配色）');
-  const goldCaps = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.accent && p.rect.h === 20);
+  const goldCaps = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.accent && p.rect.h === 24);
   assert.equal(goldCaps.length, 1, '标题要坐进金底头衔舱');
   const winnerTexts = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text' && p.text.includes('赢 2'));
   assert.ok(winnerTexts.length === 1 && winnerTexts[0]?.bold === true, '胜者行要金粗高亮');
