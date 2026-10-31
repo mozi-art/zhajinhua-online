@@ -2,7 +2,7 @@
 // ① 层次机检 —— §4 M3「只渲染 + 发意图，绝不自己判规则」落成可执行约束；
 // ② bridge / scene 的行为与确定性 —— 这两层是纯逻辑，不开浏览器就能全部钉死。
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { test, note } from './harness.ts';
 import { stateHash } from '../src/engine/state.ts';
 import { EMPTY_UI, dispatch, drain, snapshot, start } from '../webui/bridge.ts';
@@ -757,6 +757,79 @@ test('ui3/25 联机入口两个人因：空名字自动起名、离桌按钮走 
   note('ui3/25 名字必填门 + 离桌按钮钉在源上（main.ts 恒 0 覆盖，与 srv/05 同口径）');
 });
 
+// ---------------- 第三批：天天斗地主题材质（rev=12） ----------------
+
+test('ui3/39 天天斗地主题材质：金色行动钮/牌面内框/金牌金线/筹码内环，且金底深字读得出', () => {
+  const s = snapshot(opened({ bots: 1 }));
+  const sc = buildScene(s, 900, 700, TABLE_STYLE);
+  const rects = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect');
+
+  // ① 合法按钮 = 金色渐变胶囊：色标以数据进 scene（paint 零写死色的前提），半径吃到胶囊
+  const legalBtns = s.buttons.filter((b) => b.legal);
+  assert.ok(legalBtns.length >= 1, '构造前提：至少一颗合法按钮');
+  const golds = rects.filter((p) => p.grad !== undefined);
+  assert.ok(golds.length >= legalBtns.length, `合法按钮应走金色渐变，实得 ${String(golds.length)} 块 / 合法 ${String(legalBtns.length)} 颗`);
+  for (const g of golds) {
+    const grad = g.grad;
+    if (grad === undefined) continue;
+    assert.ok(grad.stops.length >= 2, '渐变色标至少两端');
+    for (const [, color] of grad.stops) assert.ok(/^#[0-9a-fA-F]{6}$/.test(color), `色标必须是 scene 侧十六进制：${color}`);
+    assert.equal(g.fill, 'transparent', '渐变钮不写平色（填充交给 paint 材质化）');
+    assert.ok(g.radius >= 14, `胶囊半径应吃到 BTN_H/2=14，实得 ${String(g.radius)}`);
+  }
+
+  // ② 可读性：金底必须配深字 —— 亮度差就是这道门（改坏任一侧都红）
+  const lum = (hex: string): number => {
+    const v = hex.replace('#', '');
+    const parts = [0, 2, 4].map((i) => parseInt(v.slice(i, i + 2), 16) || 0);
+    return (0.299 * (parts[0] as number) + 0.587 * (parts[1] as number) + 0.114 * (parts[2] as number)) / 255;
+  };
+  assert.ok(lum(TABLE_STYLE.accent) > 0.75, `accent 必须是斗地主金（够亮），实得亮度 ${lum(TABLE_STYLE.accent).toFixed(3)}`);
+  assert.ok(/^#f/i.test(TABLE_STYLE.accent), 'accent 应是暖金（R 通道最高）');
+  assert.ok(lum(TABLE_STYLE.btnText) < 0.25, `金按钮上的字必须够暗，实得亮度 ${lum(TABLE_STYLE.btnText).toFixed(3)}`);
+  sc.hits.forEach((hit, i) => {
+    const b = s.buttons[i];
+    if (b === undefined) return;
+    const inks = sc.primitives.filter(
+      (p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text' && p.y >= hit.rect.y && p.y <= hit.rect.y + hit.rect.h && p.x >= hit.rect.x && p.x <= hit.rect.x + hit.rect.w,
+    );
+    assert.ok(inks.length >= 1, `第 ${String(i)} 颗按钮上没有字`);
+    for (const t of inks) assert.equal(t.color, b.legal ? TABLE_STYLE.btnText : TABLE_STYLE.dim, `第 ${String(i)} 颗按钮字色错了（金底深字 / 灰钮暗字）`);
+  });
+  // ③ 不可点按钮保持 illegal 平色（灰钮契约：照样可点，验收③）
+  if (s.buttons.some((b) => !b.legal)) {
+    assert.ok(rects.some((p) => p.fill === TABLE_STYLE.illegal && p.grad === undefined), '不可点按钮应是 illegal 平色、不走渐变');
+  }
+
+  // ④ 亮牌时每张牌面配一道内描边，且内描边必须待在牌面里（不爬到邻牌脸上）
+  const showdown = buildScene(settledSnap(1), 1200, 820, TABLE_STYLE);
+  const faces = faceRects(showdown);
+  assert.ok(faces.length >= 3, '构造前提：结算要有亮牌');
+  const innerBorders = showdown.primitives.filter(
+    (p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === 'transparent' && p.stroke !== null && p.radius === 4,
+  );
+  assert.ok(innerBorders.length >= faces.length, `每张亮牌都该有一道内描边，实得 ${String(innerBorders.length)} / 牌面 ${String(faces.length)}`);
+  for (const ib of innerBorders) {
+    const host = faces.find((f) => ib.rect.x >= f.x && ib.rect.y >= f.y && ib.rect.x + ib.rect.w <= f.x + f.w && ib.rect.y + ib.rect.h <= f.y + f.h);
+    assert.ok(host !== undefined, `牌面内描边跑出了牌面：${JSON.stringify(ib.rect)}`);
+  }
+
+  // ⑤ 顶栏金线 + 台座金牌（细金条都在数据里）+ 筹码/头像内环（透明填充 + 描边的椭圆）
+  const goldBars = rects.filter((p) => p.fill !== 'transparent' && p.stroke === null && p.rect.h >= 1 && p.rect.h <= 3);
+  assert.ok(goldBars.length >= 2, '顶栏金线与台座金牌都应存在');
+  const rings = sc.primitives.filter((p): p is Extract<typeof p, { kind: 'ellipse' }> => p.kind === 'ellipse' && p.fill === 'transparent' && p.stroke !== null);
+  assert.ok(rings.length >= 2, '头像/筹码内环应存在');
+
+  // ⑥ 轮次金条：把快照拨到"轮到真人"，座位板顶沿必须多一条 accent 细条
+  const turnSc = buildScene({ ...s, turn: s.seats.find((x) => x.role === 'human')?.seat ?? 0 }, 900, 700, TABLE_STYLE);
+  const turnBars = turnSc.primitives.filter(
+    (p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.accent && p.stroke === null && p.rect.h === 3,
+  );
+  assert.ok(turnBars.length >= 1, '轮到此家时座位板顶沿要有金条');
+
+  note('ui3/39 斗地主题材质：金钮/深字/牌面内框/金牌/金线/筹码内环，accent 与 btnText 明度对比达标');
+});
+
 test('ui3/26 hosted 结算面板与桌务路由：不压板/牌/按钮、画布内、命中区在、main 先拦桌务、单机拒绝', () => {
   // 构造一个 hosted 结算暂停形状的快照（两座亮牌 + 结算行 + 继续按钮 + hostPaused）
   const cell = (seat: number, name: string, role: 'human' | 'remote', cards: string): import('../webmin/model.ts').SeatCell => ({
@@ -1035,4 +1108,23 @@ test('ui3/40 雀魂角位：默认 3 人桌的两位对手在左上/右上两角
     const s = snapshot(opened({ bots }));
     assert.equal(buildScene(s, 960, 620, TABLE_STYLE).plates.length, bots + 1);
   }
+});
+
+test('lby/04 资产纪律：单个二进制 ≤300KB、assets 总量 ≤600KB（BRIEF-UI §4；不用文件系统时钟，纯 readdir）', () => {
+  const dir = new URL('../webui/assets/', import.meta.url);
+  const files = readdirSync(dir);
+  assert.ok(files.length >= 1, 'assets 目录不该是空的（构造前提）');
+  let total = 0;
+  for (const name of files) {
+    const size = statSync(new URL(`../webui/assets/${name}`, import.meta.url)).size;
+    total += size;
+    assert.ok(size <= 300 * 1024, `webui/assets/${name} 单文件 ${String(size)} 字节超 300KB 上限（需压缩或程序化替代）`);
+    if (name.endsWith('.svg')) {
+      // SVG 安全门：不许带脚本/事件属性（静态服务也会端它给浏览器）
+      const text = readFileSync(new URL(`../webui/assets/${name}`, import.meta.url), 'utf8');
+      assert.ok(!/<script/i.test(text) && !/on[a-z]+\s*=/i.test(text), `webui/assets/${name} 含脚本或事件属性，拒绝入库`);
+    }
+  }
+  assert.ok(total <= 600 * 1024, `webui/assets 总量 ${String(total)} 字节超 600KB 上限`);
+  note(`lby/04 资产纪律：${String(files.length)} 个文件共 ${String(total)} 字节（单文件 ≤300KB、总量 ≤600KB、SVG 无脚本）`);
 });

@@ -45,9 +45,9 @@ let chipPrev: Record<number, number> = {};
 let chipAnim: { seat: number; since: number; count: number } | null = null;
 
 // —— 主题 / 音效 / 悬停（第一批新增，全部只待在入口层）——
-// 主题三档循环；缺省就是 TABLE_STYLE（桌绿），既有用例与验收截图都按它验收。
+// 主题三档循环；缺省就是 TABLE_STYLE（斗地主），既有用例与验收截图都按它验收。
 const THEMES: { id: string; label: string; style: Style }[] = [
-  { id: 'table', label: '桌绿', style: TABLE_STYLE },
+  { id: 'table', label: '斗地主', style: TABLE_STYLE },
   { id: 'ink', label: '墨金', style: INK_STYLE },
   { id: 'paper', label: '月白', style: PAPER_STYLE },
 ];
@@ -629,7 +629,7 @@ function boot(): void {
       say(`全屏不可用：${String((err as Error).message ?? err)}`);
     }
   });
-  // 恢复上次的主题与静音态（读不出来就按缺省：桌绿 + 静音）
+  // 恢复上次的主题与静音态（读不出来就按缺省：斗地主 + 静音）
   const savedTheme = Number(storeGet(THEME_KEY));
   if (Number.isInteger(savedTheme) && savedTheme >= 0 && savedTheme < THEMES.length) {
     themeIdx = savedTheme;

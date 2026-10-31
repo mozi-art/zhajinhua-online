@@ -3,7 +3,9 @@
 
 felt-fabric.jpg
   来源: ambientCG — Fabric 034（https://ambientcg.com/view?id=Fabric034）
-  文件: Fabric034_1K-JPG_Color.jpg（1K 颜色贴图，原样未改）
+  文件: Fabric034_1K-JPG_Color.jpg，2026-10-26 监督侧瘦身：1024px→512px（LANCZOS），
+        JPEG q80 progressive——1.15MB→47.7KB。用途是 220px 平铺 + ≤18% 透明度叠色，
+        512px 在该用途下与 1K 无视觉差；体积纪律见 BRIEF-UI.md §4。
   许可: CC0 1.0 Universal（公共领域贡献，可商用、可再分发、无需署名）
   下载时间: 2026-10-24
   用途: webui 氛围层的织物纹理叠加（CSS background 多层合成 + blend-mode，

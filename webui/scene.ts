@@ -18,7 +18,7 @@ export type Rect = { x: number; y: number; w: number; h: number };
 export type Grad = { stops: [number, string][]; radial?: boolean };
 
 export type Primitive =
-  | { kind: 'rect'; rect: Rect; fill: string; stroke: string | null; radius: number; tilt?: number }
+  | { kind: 'rect'; rect: Rect; fill: string; stroke: string | null; radius: number; tilt?: number; grad?: Grad }
   | { kind: 'ellipse'; cx: number; cy: number; rx: number; ry: number; fill: string | null; stroke: string | null; grad?: Grad }
   | { kind: 'text'; x: number; y: number; text: string; size: number; color: string; bold: boolean; align: 'left' | 'center' | 'right' }
   | { kind: 'line'; x1: number; y1: number; x2: number; y2: number; color: string };
@@ -49,6 +49,7 @@ export type Style = {
   accent: string;
   legal: string;
   illegal: string;
+  btnText: string; // 主 CTA（金按钮）上的深色字：金底深字才像天天斗地主的行动钮
   warn: string;
   cardFace: string;
   cardBack: string;
@@ -58,24 +59,31 @@ export type Style = {
   rowH: number;
 };
 
+// 牌桌字体：天天斗地主式圆润黑体。等宽换圆体只改观感，不改估算口径
+//（CJK 记 1.0 字宽、其余记 0.62，宁可估大也别估小）⇒ fitSize/wrapLabel 的行为逐字节不动。
+export const CARD_FONT = '"PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", "HarmonyOS Sans SC", sans-serif';
+
 // 拟物牌桌：绿呢台面 + 木色边轨 + 环形座位 + 中央底池。
+// rev=12 起默认主题按「天天斗地主」的视觉语言重调：饱和绿呢 + 斗地主金 accent + 金底深字的主行动钮。
+// 只换色不换布局（ui3/35 钉住 pad/rowH/font 三主题一致）；ink/paper 保留各自的墨金/朱砂 accent。
 export const TABLE_STYLE: Style = {
-  bg: '#0d1116',
-  felt: '#14563a',
-  feltEdge: '#0c3524',
-  rail: '#5b3a22',
-  panel: '#18222c',
-  panelSoft: '#21303c',
-  fg: '#eef4ef',
-  dim: '#93a8ab',
-  accent: '#f0c674',
-  legal: '#2f6f4f',
-  illegal: '#2a3540',
-  warn: '#9c4444',
-  cardFace: '#f4f1e8',
-  cardBack: '#2b4f8f',
-  cardRed: '#b5372f',
-  font: '"Cascadia Mono", "Consolas", "Noto Sans Mono CJK SC", monospace',
+  bg: '#07120d',
+  felt: '#1b6b45',
+  feltEdge: '#11452d',
+  rail: '#6b4423',
+  panel: '#12241b',
+  panelSoft: '#1e3b2b',
+  fg: '#f3f8ef',
+  dim: '#9db8a6',
+  accent: '#ffc53d',
+  legal: '#2f9e5f',
+  illegal: '#243528',
+  btnText: '#23180a',
+  warn: '#e0533a',
+  cardFace: '#fffdf4',
+  cardBack: '#1f5fa8',
+  cardRed: '#c62828',
+  font: CARD_FONT,
   pad: 14,
   rowH: 18,
 };
@@ -94,6 +102,7 @@ export const INK_STYLE: Style = {
   accent: '#d9a441',
   legal: '#44603a',
   illegal: '#2a2620',
+  btnText: '#241a08',
   warn: '#a04a3a',
   cardFace: '#f4efe4',
   cardBack: '#31415f',
@@ -116,6 +125,7 @@ export const PAPER_STYLE: Style = {
   accent: '#b8432f',
   legal: '#5c7f5c',
   illegal: '#cfc6b2',
+  btnText: '#2a0f08',
   warn: '#a04a3a',
   cardFace: '#fffdf6',
   cardBack: '#8a94a8',
@@ -160,7 +170,7 @@ function easeOutCubic(t: number): number {
 }
 
 const PAD = 8; // 座位板内边距
-const AVATAR = 26; // 头像圆环直径（程序化：首字母 + 双环，无外部素材）
+const AVATAR = 44; // 头像圆环直径（程序化：首字母 + 金圈双环，无外部素材）—— 斗地主式大头像
 const OWN_LABELS = 168; // 本人板：说明文字占左侧一栏，牌放右边（省下的竖向高度是 6 人桌的救命钱）
 const TOP_TEXT = 34; // 对手板：两行说明占顶部这条带，牌从这条带下面开始
 const CAPTION = 12; // 对手板：牌下面那行（牌型 / ···）
@@ -388,10 +398,35 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
   const hits: Hit[] = [];
   primitives.push({ kind: 'rect', rect: { x: 0, y: 0, w, h }, fill: st.bg, stroke: null, radius: 0 });
 
-  // 顶栏只放状态行：在场筹码+池与台账一起靠到右下，两边不会在窄窗口里撞成一团。
-  // 状态行是模型拼好的整句（信息全优先，不许在这儿删字），所以放不下时只能缩字号。
-  const statusSize = fitSize(snap.status, w - st.pad * 2, 13);
+  // 顶栏只放状态行 + 右侧三枚信息胶囊（斗地主式"金底深字"）。
+  // 胶囊只在宽屏出现：窄窗口里这三项已被状态行整句覆盖，硬塞只会挤掉唯一的信息来源。
+  // 图元压在状态行之前 ⇒ 状态行永远画在最上层；顶栏净空口径（ui3/21）也一字不动。
+  const badgeH = 18;
+  const badgeY = (TOP_BAR - badgeH) / 2;
+  const badgeTexts = [`第 ${String(snap.handIndex)} 手`, `注级 ${String(snap.stake)}`, `底池 ${String(snap.pot)}`];
+  const badgeGap = 6;
+  const badgeWidths = badgeTexts.map((t) => textWidth(t) * 11 + 14);
+  const badgeTotal = badgeWidths.reduce((a, b) => a + b, 0) + badgeGap * (badgeTexts.length - 1);
+  const showBadges = w >= 860;
+  const statusSize = fitSize(snap.status, w - st.pad * 2 - (showBadges ? badgeTotal + 10 : 0), 13);
   primitives.push({ kind: 'rect', rect: { x: 0, y: 0, w, h: TOP_BAR }, fill: st.panel, stroke: null, radius: 0 });
+  // 顶栏下沿一道金线：天天斗地主的页头都是"深底 + 一道金色分隔"
+  primitives.push({ kind: 'rect', rect: { x: 0, y: TOP_BAR - 1, w, h: 1 }, fill: withAlpha(st.accent, 0.55), stroke: null, radius: 0 });
+  if (showBadges) {
+    let bx = w - st.pad - badgeTotal;
+    badgeTexts.forEach((t, i) => {
+      const bw = badgeWidths[i] ?? 0;
+      primitives.push({
+        kind: 'rect',
+        rect: { x: bx, y: badgeY, w: bw, h: badgeH },
+        fill: shade(st.accent, -0.06),
+        stroke: shade(st.accent, -0.38),
+        radius: 9,
+      });
+      primitives.push(text(bx + bw / 2, badgeY + 13, t, st, { size: 11, bold: true, color: st.btnText, align: 'center' }));
+      bx += bw + badgeGap;
+    });
+  }
   primitives.push(text(st.pad, 21, snap.status, st, { size: statusSize, bold: true }));
 
   // 牌桌：3D 拟物 —— 落影 → 木轨（竖向渐变受光）→ 呢面（径向渐变）→ 内圈亮线 → 中央光池。
@@ -427,11 +462,16 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     kind: 'ellipse', cx, cy, rx: rx + RAIL, ry: ry + RAIL, fill: null, stroke: withAlpha(shade(st.rail, 0.5), 0.35),
     grad: { stops: [[0, shade(st.rail, 0.3)], [0.55, st.rail], [1, shade(st.rail, -0.42)]] },
   });
+  // 木轨内侧一道金滚边：斗地主经典场的桌沿都是"木色 + 金线"
+  primitives.push({ kind: 'ellipse', cx, cy, rx: rx + RAIL - 2, ry: ry + RAIL - 2, fill: 'transparent', stroke: withAlpha(st.accent, 0.38) });
   primitives.push({
     kind: 'ellipse', cx, cy, rx, ry, fill: null, stroke: st.feltEdge,
     grad: { stops: [[0, shade(st.felt, 0.16)], [0.55, st.felt], [1, st.feltEdge]], radial: true },
   });
   primitives.push({ kind: 'ellipse', cx, cy, rx: rx - 1.5, ry: ry - 1.5, fill: 'transparent', stroke: withAlpha(shade(st.felt, 0.5), 0.4) });
+  // 呢面里再压两道金色内框（双线滚边）：不抢牌面，但让空桌也有"场子"的仪式感
+  primitives.push({ kind: 'ellipse', cx, cy, rx: rx - 6, ry: ry - 6, fill: 'transparent', stroke: withAlpha(st.accent, 0.42) });
+  primitives.push({ kind: 'ellipse', cx, cy, rx: rx - 10, ry: ry - 10, fill: 'transparent', stroke: withAlpha(st.accent, 0.20) });
   primitives.push({
     kind: 'ellipse', cx, cy, rx: rx * 0.52, ry: ry * 0.52, fill: null, stroke: null,
     grad: { stops: [[0, withAlpha(shade(st.felt, 0.35), 0.4)], [1, withAlpha(shade(st.felt, 0.35), 0)]], radial: true },
@@ -442,8 +482,15 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
   primitives.push({ kind: 'rect', rect: { x: cx - podW / 2 + 2, y: cy - podH / 2 + 5, w: podW, h: podH }, fill: 'rgba(0,0,0,0.30)', stroke: null, radius: 14 });
   primitives.push({ kind: 'rect', rect: { x: cx - podW / 2, y: cy - podH / 2, w: podW, h: podH }, fill: shade(st.panel, -0.25), stroke: withAlpha(st.accent, 0.35), radius: 14 });
   primitives.push({ kind: 'rect', rect: { x: cx - podW / 2 + 4, y: cy - podH / 2 + 4, w: podW - 8, h: podH - 8 }, fill: 'transparent', stroke: withAlpha(shade(st.panel, 0.3), 0.5), radius: 11 });
+  // 台座顶沿一道金带：计分台读起来像一块金框记分牌（斗地主场中央的"奖牌"）
+  primitives.push({ kind: 'rect', rect: { x: cx - podW / 2 + 14, y: cy - podH / 2 - 1, w: podW - 28, h: 3 }, fill: withAlpha(st.accent, 0.75), stroke: null, radius: 1 });
   primitives.push(text(cx, cy - 12, `池 ${String(snap.pot)}`, st, { size: 18, bold: true, color: st.accent, align: 'center' }));
   primitives.push(text(cx, cy + 8, `注级 ${String(snap.stake)}`, st, { size: 13, color: st.dim, align: 'center' }));
+  // 池/注级下面一道金线：中央台座读出"计分台"的仪式感（斗地主式金牌）
+  const goldW = Math.min(92, podW * 0.56);
+  primitives.push({ kind: 'rect', rect: { x: cx - goldW / 2, y: cy + 14, w: goldW, h: 2 }, fill: withAlpha(st.accent, 0.5), stroke: null, radius: 1 });
+  // 台座底沿一行手数：顶栏胶囊被窄窗口收起时，这里仍能读到"第几手"
+  primitives.push(text(cx, cy + 27, `第 ${String(snap.handIndex)} 手`, st, { size: 10, color: st.dim, align: 'center' }));
 
   // 中央那一行"亮牌：…"是给机器读的正常文本行（理由见 webmin/model.ts 的 revealedHandsLine）。
   // 它只许待在座位环的空档里：横向避开两侧座位板，纵向压在本人板之上。
@@ -498,6 +545,16 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
         fill: j % 2 === 0 ? shade(col, 0.15) : col,
         stroke: withAlpha(shade(col, -0.4), 0.9),
       });
+      // 筹码内环：一道细边读出"筹码边缘的凹槽"（斗地主的筹码都是带边圈的）
+      primitives.push({
+        kind: 'ellipse',
+        cx: baseX + jx,
+        cy: baseY - j * CHIP.gap,
+        rx: Math.max(2, CHIP.rx - 3.5),
+        ry: Math.max(1, CHIP.ry - 1.8),
+        fill: 'transparent',
+        stroke: withAlpha(shade(col, -0.25), 0.75),
+      });
     }
     if (fly !== undefined) {
       const toX = baseX;
@@ -530,8 +587,13 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const box = (plates[slot] ?? plates[0]) as Rect;
     const c = own ? OWN_CARD : CARD;
     const isTurn = snap.turn === seat.seat && snap.phase === 'betting';
+    const isDealer = snap.dealer === seat.seat;
     primitives.push({ kind: 'rect', rect: { x: box.x + 2, y: box.y + 3, w: box.w, h: box.h }, fill: 'rgba(0,0,0,0.22)', stroke: null, radius: 8 });
     primitives.push({ kind: 'rect', rect: box, fill: seat.departed ? st.panelSoft : st.panel, stroke: isTurn ? st.accent : st.dim, radius: 8 });
+    // 轮到此家：座位板顶沿一道金条（斗地主的"该你了"——比整框描边更醒目，且不占额外几何）
+    if (isTurn) primitives.push({ kind: 'rect', rect: { x: box.x + 7, y: box.y + 5, w: box.w - 14, h: 3 }, fill: st.accent, stroke: null, radius: 2 });
+    // 赢家金框：结算那一刻，赢家的座位板内圈点亮（胜负信息来自 model 的 resultText，scene 只做描边）
+    if (seat.resultText.startsWith('赢')) primitives.push({ kind: 'rect', rect: { x: box.x + 2, y: box.y + 2, w: box.w - 4, h: box.h - 4 }, fill: 'transparent', stroke: withAlpha(st.accent, 0.85), radius: 7 });
 
     const cardX = own ? box.x + OWN_LABELS : box.x + PAD;
     const cardY = own ? box.y + PAD : box.y + TOP_TEXT;
@@ -540,18 +602,28 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     // 联机桌上把别人标成 bot 会印出"[电脑]"，那是错的（M5 加的就是这一档）。
     const who = seat.role === 'human' ? '[你]' : seat.role === 'bot' ? '[电脑]' : '[玩家]';
     const head = `${seat.marks}${seat.name}${who} ${seat.departed ? '离桌' : seat.looked ? '明' : '闷'}`;
-    const labelRoom = (own ? OWN_LABELS - AVATAR - 6 : box.w) - PAD * 2 - 4;
+    // 庄家金牌占右上角：先把它的宽度从文字栏里扣掉，名牌与金牌永不叠字
+    const dealerRoom = isDealer ? 22 : 0;
+    const labelRoom = (own ? OWN_LABELS - AVATAR - 6 : box.w) - PAD * 2 - 4 - dealerRoom;
     // 头像圆环只上本人板（对手板 124 宽是 6 人桌窄视口的活口，对手的身份感来自角位与名牌）。
+    // 金圈 + 深底 + 大首字，读起来就是斗地主的"座位头像"；轮次时整圈点亮。
     // 首字母用 accent 色：ui3/24 以"居中+前景色"圈出亮牌行，头像字必须避开这条判定；
     // 首字母若恰好是牌面字符（联机玩家名不可控）则回退 '#'，不给防泄漏扫描（ui3/11）添假阳性。
     if (own) {
       const avCx = box.x + PAD + AVATAR / 2;
-      const avCy = box.y + 40;
+      const avCy = box.y + box.h / 2;
       const initial = seat.name.slice(0, 1);
       const glyph = /^[2-9TJQKA♠♥♣♦]$/.test(initial) ? '#' : initial;
-      primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2, ry: AVATAR / 2, fill: shade(st.panelSoft, 0.12), stroke: isTurn ? st.accent : withAlpha(st.dim, 0.7) });
+      primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2, ry: AVATAR / 2, fill: shade(st.panelSoft, 0.12), stroke: isTurn ? st.accent : withAlpha(st.accent, 0.72) });
       primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2 - 3, ry: AVATAR / 2 - 3, fill: 'transparent', stroke: withAlpha(shade(st.panelSoft, 0.4), 0.5) });
-      primitives.push(text(avCx, avCy + 4.5, glyph, st, { size: 12, bold: true, color: st.accent, align: 'center' }));
+      primitives.push(text(avCx, avCy + 6, glyph, st, { size: 18, bold: true, color: st.accent, align: 'center' }));
+    }
+    // 庄家金牌：金底深字的圆角小牌，位置在本人说明栏 / 对手板右上角（都避开牌面）
+    if (isDealer) {
+      const dw = 22;
+      const dx = (own ? box.x + OWN_LABELS - 4 : box.x + box.w - 6) - dw;
+      primitives.push({ kind: 'rect', rect: { x: dx, y: box.y + 5, w: dw, h: 15 }, fill: st.accent, stroke: shade(st.accent, -0.4), radius: 7 });
+      primitives.push(text(dx + dw / 2, box.y + 16, '庄', st, { size: 10, bold: true, color: st.btnText, align: 'center' }));
     }
     primitives.push(text(labelX, box.y + (own ? 16 : 14), head, st, { size: fitSize(head, labelRoom, own ? 15 : 13), bold: true, color: seat.departed ? st.dim : st.fg }));
     const chipsLine = `筹码 ${String(seat.chips)} · 投入 ${String(seat.committed)}`;
@@ -591,10 +663,52 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
         kind: 'rect',
         rect: { x: px, y: py, w: c.w, h: c.h },
         fill: faceUp ? st.cardFace : st.cardBack,
-        stroke: faceUp ? st.dim : '#8fa398',
+        stroke: faceUp ? shade(st.cardFace, -0.3) : shade(st.cardBack, 0.28),
         radius: 6,
         ...(tilt !== undefined ? { tilt } : {}),
       });
+      // 牌面内描边（斗地主牌的一道细框）：让牌在绿呢上"是一张牌"而不是一块白。
+      // 只在亮牌时画（牌背有自己的花色肌理）；fill=transparent ⇒ 不进 ui3/20 的结算块筛选，
+      // 也不是 cardFace ⇒ 不进 ui3/18/23 的牌面收集。
+      // 外面再套一道金细线（经典场白牌的金边），两道线都在牌面内，不爬到邻牌脸上。
+      if (faceUp) {
+        primitives.push({
+          kind: 'rect',
+          rect: { x: px + 1.5, y: py + 1.5, w: c.w - 3, h: c.h - 3 },
+          fill: 'transparent',
+          stroke: withAlpha(st.accent, 0.38),
+          radius: 5,
+          ...(tilt !== undefined ? { tilt } : {}),
+        });
+        primitives.push({
+          kind: 'rect',
+          rect: { x: px + 3, y: py + 3, w: c.w - 6, h: c.h - 6 },
+          fill: 'transparent',
+          stroke: withAlpha(shade(st.cardFace, -0.4), 0.55),
+          radius: 4,
+          ...(tilt !== undefined ? { tilt } : {}),
+        });
+      } else {
+        // 蓝金牌背：内描边 + 中央金菱（斗地主经典牌背的程式化花纹），随发牌飞行一起倾斜落位。
+        // 不用 radius=4：那道口径留给牌面内框（ui3/39 只在牌面里查它）。
+        primitives.push({
+          kind: 'rect',
+          rect: { x: px + 3, y: py + 3, w: c.w - 6, h: c.h - 6 },
+          fill: 'transparent',
+          stroke: withAlpha(shade(st.cardBack, 0.55), 0.85),
+          radius: 5,
+          ...(tilt !== undefined ? { tilt } : {}),
+        });
+        // 中央金菱用四条 line 画：行图元不经过 paint 的旋转路径，静态几何才能与 ui3/12 逐字对上
+        const ex = px + c.w / 2;
+        const ey = py + c.h / 2;
+        const er = Math.min(6, c.w / 2 - 8);
+        const ec = withAlpha(shade(st.accent, 0.1), 0.9);
+        primitives.push({ kind: 'line', x1: ex, y1: ey - er, x2: ex + er, y2: ey, color: ec });
+        primitives.push({ kind: 'line', x1: ex + er, y1: ey, x2: ex, y2: ey + er, color: ec });
+        primitives.push({ kind: 'line', x1: ex, y1: ey + er, x2: ex - er, y2: ey, color: ec });
+        primitives.push({ kind: 'line', x1: ex - er, y1: ey, x2: ex, y2: ey - er, color: ec });
+      }
     }
     // 结果/牌型那行：本人放在左侧说明栏的第四行（牌下面会压到牌面），别家放在牌的正下方
     const captionX = own ? labelX : cardX;
@@ -625,11 +739,17 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
   const ledgerLine = `${TOTAL_LABEL} ${String(snap.total)} · ${snap.ledgerLine}`;
   if (panel !== null) {
     primitives.push({ kind: 'rect', rect: panel, fill: st.panelSoft, stroke: st.accent, radius: 8 });
+    // 结算块顶沿金线 + 左侧金签：结算这一刻也要有"开奖"的仪式感
+    primitives.push({ kind: 'rect', rect: { x: panel.x + 10, y: panel.y + 5, w: panel.w - 20, h: 2 }, fill: withAlpha(st.accent, 0.6), stroke: null, radius: 1 });
+    primitives.push({ kind: 'rect', rect: { x: panel.x + 1, y: panel.y + 8, w: 2, h: 10 }, fill: withAlpha(st.accent, 0.8), stroke: null, radius: 1 });
     settle.forEach((line, i) => {
       primitives.push(text(panel.x + 10, panel.y + 20 + i * st.rowH, line, st, { size: fitSize(line, panel.w - 20, 12), color: st.fg }));
     });
     primitives.push(text(panel.x + panel.w - 10, panel.y + 20 + settle.length * st.rowH, ledgerLine, st, { size: fitSize(ledgerLine, panel.w - 20, 12), color: st.dim, align: 'right' }));
   } else {
+    // 行动日志底衬：一块半透明圆角面板 + 顶沿金线，把日志从"散字"收成一条信息栏
+    primitives.push({ kind: 'rect', rect: { x: st.pad, y: stripTop, w: w - st.pad * 2, h: stripLines * st.rowH + 22 }, fill: withAlpha(st.panel, 0.62), stroke: withAlpha(st.dim, 0.18), radius: 8 });
+    primitives.push({ kind: 'rect', rect: { x: st.pad + 10, y: stripTop, w: w - st.pad * 2 - 20, h: 2 }, fill: withAlpha(st.accent, 0.5), stroke: null, radius: 1 });
     // 表头行：左边是"行动日志"，有提示/收桌原因时就地顶掉它（同一条位置，不去挤右侧的台账）
     const header = snap.over ?? (snap.note !== null ? `提示：${snap.note}` : '行动日志');
     const headerColor = snap.over !== null ? st.accent : snap.note !== null ? st.warn : st.dim;
@@ -642,21 +762,44 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     });
   }
 
-  // 意图按钮：合法绿、非法灰但照样可点（验收③）。文案与价格全来自模型，这里只管排版（放不下就折两行）。
+  // 意图按钮：斗地主式行动钮 —— 可点 = 金色渐变胶囊 + 深色字；不可点 = 深灰绿 + 暗字（照样可点，验收③）。
+  // 文案与价格全来自模型，这里只管排版（放不下就折两行）；几何（BTN_H / 网格 / 命中区）一律不动。
   snap.buttons.forEach((b, i) => {
     const c = i % grid.cols;
     const r = Math.floor(i / grid.cols);
     const rect = { x: st.pad + c * (grid.btnW + st.pad), y: btnTop + r * (BTN_H + st.pad), w: grid.btnW, h: BTN_H };
-    primitives.push({ kind: 'rect', rect, fill: b.legal ? st.legal : st.illegal, stroke: b.legal ? st.fg : st.dim, radius: 5 });
+    // 按钮落影：金钮"浮"在深色底栏上（斗地主行动钮都有实体厚度）
+    primitives.push({ kind: 'rect', rect: { x: rect.x + 1, y: rect.y + 3, w: rect.w, h: rect.h }, fill: 'rgba(0,0,0,0.30)', stroke: null, radius: 14 });
+    if (b.legal) {
+      primitives.push({
+        kind: 'rect',
+        rect,
+        fill: 'transparent',
+        grad: { stops: [[0, shade(st.accent, 0.3)], [0.52, st.accent], [1, shade(st.accent, -0.2)]] },
+        stroke: shade(st.accent, -0.45),
+        radius: Math.min(14, BTN_H / 2),
+      });
+      // 内高光：金钮上沿一道亮线，读起来像打光的树脂键帽（填充透明 ⇒ 不碰任何牌面/面板筛选）
+      primitives.push({
+        kind: 'rect',
+        rect: { x: rect.x + 2, y: rect.y + 2, w: rect.w - 4, h: rect.h - 5 },
+        fill: 'transparent',
+        stroke: withAlpha(shade(st.accent, 0.8), 0.5),
+        radius: 11,
+      });
+    } else {
+      primitives.push({ kind: 'rect', rect, fill: st.illegal, stroke: st.dim, radius: 5 });
+    }
+    const ink = b.legal ? st.btnText : st.dim;
     const avail = grid.btnW - 16;
     const lines = wrapLabel(b.text, avail, 13);
     const longest = lines.reduce((a, l) => (textWidth(l) > textWidth(a) ? l : a), '');
     const size = Math.max(10, Math.min(13, Math.floor(avail / Math.max(1, textWidth(longest)))));
     if (lines.length === 1) {
-      primitives.push(text(rect.x + 8, rect.y + 19, lines[0] ?? '', st, { size, color: b.legal ? st.fg : st.dim }));
+      primitives.push(text(rect.x + 8, rect.y + 19, lines[0] ?? '', st, { size, color: ink }));
     } else {
-      primitives.push(text(rect.x + 8, rect.y + 12, lines[0] ?? '', st, { size, color: b.legal ? st.fg : st.dim }));
-      primitives.push(text(rect.x + 8, rect.y + 25, lines[1] ?? '', st, { size, color: b.legal ? st.fg : st.dim }));
+      primitives.push(text(rect.x + 8, rect.y + 12, lines[0] ?? '', st, { size, color: ink }));
+      primitives.push(text(rect.x + 8, rect.y + 25, lines[1] ?? '', st, { size, color: ink }));
     }
     hits.push({ id: `btn:${String(i)}`, rect, intent: b.intent });
   });
@@ -666,7 +809,7 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
   // 不遮按钮条、不出画布**（继续/等待的提示就住在按钮条里，遮了就点不着）。
   // 配色刻意独立：面板 = panel + legal 描边、文字 = accent/dim/legal/warn —— 避开 ui3/20 的
   // 「panelSoft+accent = 结算块」筛选与 ui3/24 的「fg 居中文本」收编（solo 恒不触发 hostPaused，
-  // 既有 ui3 用例一个都碰不到这块）。
+  // 既有 ui3 用例一个都碰不到这块）。legal 描边同时是"可以继续"的语义绿。
   if (snap.hostPaused) {
     const iAmHost = snap.buttons.some((b) => b.intent.kind === 'begin' && b.legal);
     const lines: string[] = ['本局结算', ...snap.settlement];
@@ -677,6 +820,8 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const px = Math.floor(w / 2 - pw / 2);
     const py = Math.floor(h * 0.3 + (h * 0.42 - ph) / 2);
     primitives.push({ kind: 'rect', rect: { x: px, y: py, w: pw, h: ph }, fill: st.panel, stroke: st.legal, radius: 10 });
+    // 面板顶沿一道金线：联机结算面板与单机结算块同一套"金框"语言
+    primitives.push({ kind: 'rect', rect: { x: px + 12, y: py + 5, w: pw - 24, h: 2 }, fill: withAlpha(st.accent, 0.6), stroke: null, radius: 1 });
     const visible = Math.max(1, Math.floor((ph - st.pad * 2) / lineH));
     lines.slice(0, visible).forEach((line, i) => {
       const isTitle = i === 0;

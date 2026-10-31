@@ -5,6 +5,7 @@
 import type { Primitive, Scene } from './scene.ts';
 
 type EllipsePrim = Extract<Primitive, { kind: 'ellipse' }>;
+type RectPrim = Extract<Primitive, { kind: 'rect' }>;
 
 // 把 scene 数据里的渐变色标材质化为 CanvasGradient（radial = 椭圆内径向，缺省 = 竖向线性）。
 function materializeGrad(ctx: CanvasRenderingContext2D, p: EllipsePrim): string | CanvasGradient {
@@ -13,6 +14,19 @@ function materializeGrad(ctx: CanvasRenderingContext2D, p: EllipsePrim): string 
   const g = grad.radial === true
     ? ctx.createRadialGradient(p.cx, p.cy, 0, p.cx, p.cy, Math.max(p.rx, p.ry, 1))
     : ctx.createLinearGradient(p.cx, p.cy - p.ry, p.cx, p.cy + p.ry);
+  for (const [offset, color] of grad.stops) g.addColorStop(offset, color);
+  return g;
+}
+
+// 矩形渐变：缺省竖向线性（上亮下暗，正是"金色行动钮"的受光方向）；radial = 矩形中心径向。
+// 颜色依旧全部来自 scene 的色标数据 —— 本文件一个十六进制都不写（ui3/38）。
+function materializeRectGrad(ctx: CanvasRenderingContext2D, p: RectPrim): string | CanvasGradient {
+  const grad = p.grad;
+  if (grad === undefined) return p.fill;
+  const { x, y, w, h } = p.rect;
+  const g = grad.radial === true
+    ? ctx.createRadialGradient(x + w / 2, y + h / 2, 0, x + w / 2, y + h / 2, Math.max(w, h, 1) / 2)
+    : ctx.createLinearGradient(x, y, x, y + h);
   for (const [offset, color] of grad.stops) g.addColorStop(offset, color);
   return g;
 }
@@ -27,7 +41,7 @@ function drawPrimitive(ctx: CanvasRenderingContext2D, p: Primitive, font: string
         ctx.translate(p.rect.x + p.rect.w / 2, p.rect.y + p.rect.h / 2);
         ctx.rotate((p.tilt * Math.PI) / 180);
         ctx.roundRect(-p.rect.w / 2, -p.rect.h / 2, p.rect.w, p.rect.h, r);
-        ctx.fillStyle = p.fill;
+        ctx.fillStyle = p.grad !== undefined ? materializeRectGrad(ctx, p) : p.fill;
         ctx.fill();
         if (p.stroke !== null) {
           ctx.strokeStyle = p.stroke;
@@ -38,7 +52,7 @@ function drawPrimitive(ctx: CanvasRenderingContext2D, p: Primitive, font: string
         return;
       }
       ctx.roundRect(p.rect.x, p.rect.y, p.rect.w, p.rect.h, r);
-      ctx.fillStyle = p.fill;
+      ctx.fillStyle = p.grad !== undefined ? materializeRectGrad(ctx, p) : p.fill;
       ctx.fill();
       if (p.stroke !== null) {
         ctx.strokeStyle = p.stroke;

@@ -3,37 +3,53 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>炸金花 · M3/M5 正式 UI（Canvas）</title>
+    <title>炸金花 · 好友桌</title>
     <style>
       :root { color-scheme: dark; }
-      body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: #0a1224; color: #eef4ef; font-family: "Cascadia Mono", "Consolas", "Noto Sans Mono CJK SC", monospace; }
-      /* 竖向预算：画布要拿到 ≥560 高才不触发"窗口太小"（工单 §4 rev=7 的验收窗口是 720×640）。
-         所以页面自身的框架必须压到 ~80px 以内：控制条走"紧凑两行"，容器内边距 2px，绝不写死 calc(100vh - N)。
-         M5 加了联机控件，靠"两种模式各藏一半"把行数顶回去：单机那五个不联机的看不见，反之亦然。 */
-      header { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 4px 10px; background: #101b2c; border-bottom: 1px solid #23324a; font-size: 12px; }
-      header h1 { font-size: 13px; margin: 0 8px 0 0; font-weight: 700; }
-      header label { color: #9fb3a8; display: flex; gap: 4px; align-items: center; }
-      header select, header input { background: #0f1720; color: #eef4ef; border: 1px solid #2b3a48; border-radius: 4px; padding: 1px 4px; font: inherit; }
+      /* 天天斗地主式外壳：深墨绿底 + 斗地主金强调 + 金底深字的主行动钮。
+         字体与 scene 的 CARD_FONT 同源（圆体黑体）—— 页面与牌桌不像两套东西。
+         竖向预算纪律（rev=7）一字不改：页面框架仍压在 ~80px 以内（控制条紧凑两行、
+         容器内边距 2px、绝不写死 calc(100vh - N)），否则 720×640 验收窗口里画布拿不到 560 高。 */
+      body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+        background: radial-gradient(125% 92% at 50% 0%, #0e2b1d 0%, #07120d 60%, #040c08 100%);
+        color: #f3f8ef; font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", "HarmonyOS Sans SC", sans-serif; }
+      header { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 4px 10px;
+        background: linear-gradient(#152c1f, #0d1b13); border-bottom: 1px solid rgba(255, 197, 61, 0.32); font-size: 12px; }
+      header h1 { font-size: 13px; margin: 0 8px 0 0; font-weight: 700; color: #ffc53d; letter-spacing: 0.05em; }
+      header label { color: #9db8a6; display: flex; gap: 4px; align-items: center; }
+      header select, header input { background: #0c1a12; color: #f3f8ef; border: 1px solid #2b4a38; border-radius: 4px; padding: 1px 4px; font: inherit; }
       header input { width: 6.5em; }
       #netUrl { width: 15em; }
       #netName { width: 7em; }
-      header button { background: #2f6f4f; color: #eaf5ee; border: 1px solid #7fd6a8; border-radius: 5px; padding: 2px 10px; font: inherit; cursor: pointer; }
-      header a { color: #8fa398; }
-      /* 氛围/音效/全屏走"幽灵款"：与主行动按钮（开新一桌/连接）在视觉上分主次 */
-      header button.ghost { background: #18222c; color: #9fb3a8; border-color: #2b3a48; }
-      header button.ghost:hover { color: #eef4ef; border-color: #7fd6a8; }
-      #hint { margin-left: auto; color: #8fa398; }
+      /* 主行动钮（开新一桌 / 连接）：斗地主金渐变 + 深字 + 内高光，与 scene 里的金色行动钮同一套材质 */
+      header button { background: linear-gradient(#ffd968, #f0a52a); color: #23180a; border: 1px solid #b87a12;
+        border-radius: 6px; padding: 2px 10px; font: inherit; font-weight: 700; cursor: pointer;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 1px 2px rgba(0, 0, 0, 0.4); }
+      header button:hover { filter: brightness(1.07); }
+      header button:active { filter: brightness(0.94); }
+      /* 键盘可达：金描边聚焦环，鼠标点击不亮（focus-visible），不改变任何尺寸 */
+      header select:focus-visible, header input:focus-visible, header button:focus-visible {
+        outline: 2px solid #ffc53d; outline-offset: 1px; }
+      header a { color: #9db8a6; }
+      /* 氛围/音效/全屏走"幽灵款"：与主行动按钮在视觉上分主次 */
+      header button.ghost { background: #12241b; color: #9db8a6; border-color: #2b4a38; box-shadow: none; font-weight: 400; }
+      header button.ghost:hover { color: #f3f8ef; border-color: #ffc53d; }
+      #hint { margin-left: auto; color: #c7d8cd; padding: 1px 8px; border-radius: 999px;
+        background: rgba(255, 197, 61, 0.07); border: 1px solid rgba(255, 197, 61, 0.20); }
       /* 成组显隐：display:contents 让 label 仍然直接排在 header 这条 flex 里，收起时整组变 none */
       .solo-only, .online-only { display: contents; }
       body.mode-solo .online-only { display: none; }
       body.mode-online .solo-only { display: none; }
       #stage { position: relative; flex: 1 1 auto; min-height: 0; padding: 2px; display: flex; }
-      #board { width: 100%; height: 100%; display: block; background: #10161d; border: 1px solid #24313d; border-radius: 8px; }
+      /* 画布金框：牌桌是主角，外框只做"托住它"的那一道 */
+      #board { width: 100%; height: 100%; display: block; background: #07120d;
+        border: 1px solid rgba(255, 197, 61, 0.32); border-radius: 10px;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 10px 28px rgba(0, 0, 0, 0.45); }
       /* 氛围层：纯 DOM 覆盖在 canvas 之上，全部半透明（canvas 的透视地板/罗盘由 scene
          以 line/ellipse 图元绘制——不透明层会盖住整张牌桌，这是实测踩过的坑）。
          组成 = 中央辉光 + 暗角 + 织物肌理（CC0，assets/felt-fabric.jpg）+ 水印 + 金线内框，
          随 body[data-theme] 过渡 240ms；pointer-events:none 不挡任何交互。 */
-      #amb { position: absolute; inset: 2px; pointer-events: none; border-radius: 8px; overflow: hidden;
+      #amb { position: absolute; inset: 2px; pointer-events: none; border-radius: 10px; overflow: hidden;
         background:
           radial-gradient(120% 95% at 50% 36%, var(--amb-glow), transparent 62%),
           radial-gradient(150% 130% at 50% 52%, transparent 45%, var(--amb-vignette) 100%);
@@ -44,17 +60,18 @@
         font-weight: 700; color: var(--amb-wm); opacity: 0.05; }
       #amb::after { content: ""; position: absolute; inset: 0; background: url("./assets/felt-fabric.jpg");
         background-size: 220px 220px; opacity: var(--amb-fabric); mix-blend-mode: overlay; }
-      body { --amb-glow: rgba(96, 150, 255, 0.10); --amb-vignette: rgba(2, 6, 14, 0.62); --amb-line: rgba(212, 175, 105, 0.35); --amb-wm: #cfe0ff; --amb-fabric: 0.14; }
+      /* 三套氛围变量与 scene 的三个主题一一对应（默认 = 斗地主绿金） */
+      body { --amb-glow: rgba(255, 197, 61, 0.10); --amb-vignette: rgba(2, 10, 6, 0.60); --amb-line: rgba(255, 197, 61, 0.32); --amb-wm: #ffe6a3; --amb-fabric: 0.16; }
       body[data-theme="ink"] { --amb-glow: rgba(217, 164, 65, 0.09); --amb-vignette: rgba(5, 4, 2, 0.55); --amb-line: rgba(217, 164, 65, 0.30); --amb-wm: #efe9dc; --amb-fabric: 0.12; }
-      body[data-theme="paper"] { --amb-glow: rgba(255, 253, 246, 0.65); --amb-vignette: rgba(94, 84, 60, 0.28); --amb-line: rgba(42, 38, 32, 0.30); --amb-wm: #2a2620; --amb-fabric: 0.18; }
+      body[data-theme="paper"] { --amb-glow: rgba(255, 253, 246, 0.65); --amb-vignette: rgba(94, 84, 60, 0.28); --amb-line: rgba(183, 67, 47, 0.30); --amb-wm: #2a2620; --amb-fabric: 0.18; }
       /* aria-live 播报位：视觉隐藏，读屏器可见 */
       .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-      .muted { color: #8fa398; }
+      .muted { color: #9db8a6; }
     </style>
   </head>
   <body class="mode-solo">
     <header>
-      <h1>炸金花 · M3</h1>
+      <h1>炸金花 · 好友桌</h1>
       <a id="lobbyLink" class="muted" href="./lobby.html">大厅</a>
       <label>模式 <select id="mode"><option value="solo" selected>单机</option><option value="online">联机</option></select></label>
       <span class="solo-only">
@@ -72,7 +89,7 @@
       </span>
       <label>买入 <input id="buyIn" type="number" value="256" min="1" /></label>
       <span id="hint" class="muted">未开局</span>
-      <button id="themeBtn" class="ghost" type="button" title="循环切换主题：桌绿 → 墨金 → 月白">主题：桌绿</button>
+      <button id="themeBtn" class="ghost" type="button" title="循环切换主题：斗地主 → 墨金 → 月白">主题：斗地主</button>
       <button id="muteBtn" class="ghost" type="button" title="程序化合成音效开/关（快捷键 M）">音效：关</button>
       <button id="fsBtn" class="ghost" type="button" title="全屏 / 退出全屏">全屏</button>
     </header>

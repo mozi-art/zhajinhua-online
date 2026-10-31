@@ -529,6 +529,11 @@ test('ui/13 静态服务的白名单与路径穿越防护', () => {
     '/node_modules/typescript/package.json',
     '/webmin/x.png',
     '/webmin/x.exe',
+    // 图片收窄规则（3d0d022）：webui 下、assets 之外的图片同样拒绝 ——
+    // 只钉 webmin+x.png 的话，"把图片挪进 webui 根目录"这条绕路就没人看着
+    '/webui/evil.png',
+    '/webui/../src/cards.png',
+    '/src/engine/state.jpg',
     '/etc/passwd',
     'C:\\Windows\\win.ini',
   ]) {
