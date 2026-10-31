@@ -23,7 +23,14 @@ export type Primitive =
   | { kind: 'text'; x: number; y: number; text: string; size: number; color: string; bold: boolean; align: 'left' | 'center' | 'right' }
   | { kind: 'line'; x1: number; y1: number; x2: number; y2: number; color: string };
 
-export type Hit = { id: string; rect: Rect; intent: ButtonOption['intent'] };
+export type Hit = {
+  id: string;
+  // 命中区：视觉钮四周外扩过的矩形（触屏可点面积 ≥44px 高）。hitAt 用它。
+  rect: Rect;
+  // 视觉钮：真正画出来的那颗胶囊。hover 高亮画在它上面（外扩区只是"好点"，不该被看见）。
+  visual: Rect;
+  intent: ButtonOption['intent'];
+};
 
 export type Scene = {
   width: number;
@@ -186,7 +193,8 @@ export const OPP_PLATE = { w: CARD.pitch * 2 + CARD.w + PAD * 2, h: TOP_TEXT + C
 export const OWN_PLATE = { w: OWN_LABELS + OWN_CARD.pitch * 2 + OWN_CARD.w + PAD, h: OWN_CARD.h + PAD * 2 }; // 352 × 94
 const BAND_GAP = 4;
 const TOP_BAR = 32;
-const BTN_H = 28;
+const BTN_H = 30; // M-UI3：视觉钮 30px；命中区纵向外扩 6px = 触屏可点 42px 高（行距 12 两倍约束下的上限）
+const BTN_GAP = 12; // 按钮行距（与 st.pad 解耦）：BTN_H+BTN_GAP = 42 与 M-UI1 的 28+14 逐字节相同 ⇒ 竖向预算零变化
 const MIN_BTN_W = 112;
 
 // 翻牌动画：since = 该座位牌面首次可见的时刻（由调用方计时），duration = 一次翻牌用时。
@@ -196,7 +204,16 @@ const MIN_BTN_W = 112;
 // 飞行中额外画、落定后不画（堆里本来就有它们）⇒ 两端与不带 chips 逐字节一致（ui3/32）。
 export type DealAnim = { start: number; duration: number; stagger: number };
 export type ChipAnim = { seat: number; since: number; count: number };
-export type Anim = { now: number; since: Record<number, number>; duration: number; deal?: DealAnim; chips?: ChipAnim };
+export type Anim = {
+  now: number;
+  since: Record<number, number>;
+  duration: number;
+  deal?: DealAnim;
+  chips?: ChipAnim;
+  // 呼吸开关（M-UI3）：true = 可点按钮与赢家光效按 now 正弦呼吸（确定性纯函数，无时钟状态）。
+  // 缺省 false ⇒ 输出与没有这个参数完全一致（ui3/34 的"纯入参"纪律延伸到动效）。
+  pulse?: boolean;
+};
 
 export const IDLE_ANIM: Anim = { now: 0, since: {}, duration: 320 };
 
@@ -388,10 +405,10 @@ function placePlates(seatCount: number, ring: Rect): Rect[] {
 // 只有候选多到"每列 112px 还排不完"时行数才会涨上去。
 function buttonGrid(count: number, w: number, st: Style): { cols: number; rows: number; btnW: number; barH: number } {
   const inner = w - st.pad * 2;
-  const maxCols = Math.max(1, Math.floor((inner + st.pad) / (MIN_BTN_W + st.pad)));
+  const maxCols = Math.max(1, Math.floor((inner + BTN_GAP) / (MIN_BTN_W + BTN_GAP)));
   const cols = Math.max(1, Math.min(maxCols, count));
   const rows = Math.max(1, Math.ceil(count / cols));
-  return { cols, rows, btnW: (inner - st.pad * (cols - 1)) / cols, barH: rows * (BTN_H + st.pad) };
+  return { cols, rows, btnW: (inner - BTN_GAP * (cols - 1)) / cols, barH: rows * (BTN_H + BTN_GAP) };
 }
 
 // 悬停入参：坐标由调用方（main.ts 的 mousemove）给出，scene 只负责"在命中按钮上叠一块高亮"。
@@ -628,8 +645,13 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     primitives.push({ kind: 'rect', rect: box, fill: seat.departed ? st.panelSoft : st.panel, stroke: isTurn ? st.accent : st.dim, radius: 8 });
     // 轮到此家：座位板顶沿一道金条（斗地主的"该你了"——比整框描边更醒目，且不占额外几何）
     if (isTurn) primitives.push({ kind: 'rect', rect: { x: box.x + 7, y: box.y + 5, w: box.w - 14, h: 3 }, fill: st.accent, stroke: null, radius: 2 });
-    // 赢家金框：结算那一刻，赢家的座位板内圈点亮（胜负信息来自 model 的 resultText，scene 只做描边）
-    if (seat.resultText.startsWith('赢')) primitives.push({ kind: 'rect', rect: { x: box.x + 2, y: box.y + 2, w: box.w - 4, h: box.h - 4 }, fill: 'transparent', stroke: withAlpha(st.accent, 0.85), radius: 7 });
+    // 赢家金框 + 光效：结算那一刻赢家座位板内圈点亮；pulse 开着时光环呼吸（"开奖"的庆祝感）。
+    // 光环画在板外沿 3px 处 —— 不进任何牌面/面板收集器（fill=transparent 且色值是派生 alpha）。
+    if (seat.resultText.startsWith('赢')) {
+      primitives.push({ kind: 'rect', rect: { x: box.x + 2, y: box.y + 2, w: box.w - 4, h: box.h - 4 }, fill: 'transparent', stroke: withAlpha(st.accent, 0.85), radius: 7 });
+      const halo = anim.pulse === true ? 0.2 + 0.3 * (0.5 + 0.5 * Math.sin(anim.now / 300 + 1.2)) : 0.35;
+      primitives.push({ kind: 'rect', rect: { x: box.x - 3, y: box.y - 3, w: box.w + 6, h: box.h + 6 }, fill: 'transparent', stroke: withAlpha(st.accent, halo), radius: 10 });
+    }
 
     const cardX = own ? box.x + OWN_LABELS : box.x + PAD;
     const cardY = own ? box.y + PAD : box.y + TOP_TEXT;
@@ -828,11 +850,13 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
   }
 
   // 意图按钮：斗地主式行动钮 —— 可点 = 金色渐变胶囊 + 深色字；不可点 = 深灰绿 + 暗字（照样可点，验收③）。
-  // 文案与价格全来自模型，这里只管排版（放不下就折两行）；几何（BTN_H / 网格 / 命中区）一律不动。
+  // 文案与价格全来自模型，这里只管排版（放不下就折两行）。
+  // M-UI3 命中区口径：命中 rect = 视觉钮四周外扩 6px（合成高 44px，触屏可点面积）；
+  // hover 高亮画在 visual（视觉钮）上 —— 外扩区只是"好点"，不该被看见（ui3/34 的新口径）。
   snap.buttons.forEach((b, i) => {
     const c = i % grid.cols;
     const r = Math.floor(i / grid.cols);
-    const rect = { x: st.pad + c * (grid.btnW + st.pad), y: btnTop + r * (BTN_H + st.pad), w: grid.btnW, h: BTN_H };
+    const rect = { x: st.pad + c * (grid.btnW + BTN_GAP), y: btnTop + r * (BTN_H + BTN_GAP), w: grid.btnW, h: BTN_H };
     // 按钮落影：金钮"浮"在深色底栏上（斗地主行动钮都有实体厚度）
     primitives.push({ kind: 'rect', rect: { x: rect.x + 1, y: rect.y + 3, w: rect.w, h: rect.h }, fill: 'rgba(0,0,0,0.30)', stroke: null, radius: 14 });
     if (b.legal) {
@@ -844,16 +868,18 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
         stroke: shade(st.accent, -0.45),
         radius: Math.min(14, BTN_H / 2),
       });
-      // 内高光：金钮上沿一道亮线，读起来像打光的树脂键帽（填充透明 ⇒ 不碰任何牌面/面板筛选）
+      // 呼吸内晕（M-UI3）：anim.pulse 开着时，内高光的亮度按 now 正弦起伏 —— 轮到你/可准备/可继续
+      // 的按钮"活着"。确定性纯函数：同一 now 两次布局逐字节相同（ui3/42），pulse 缺省 ⇒ 与旧状一致。
+      const breathe = anim.pulse === true ? 0.32 + 0.3 * (0.5 + 0.5 * Math.sin(anim.now / 280)) : 0.5;
       primitives.push({
         kind: 'rect',
         rect: { x: rect.x + 2, y: rect.y + 2, w: rect.w - 4, h: rect.h - 5 },
         fill: 'transparent',
-        stroke: withAlpha(shade(st.accent, 0.8), 0.5),
+        stroke: withAlpha(shade(st.accent, 0.8), breathe),
         radius: 11,
       });
     } else {
-      primitives.push({ kind: 'rect', rect, fill: st.illegal, stroke: st.dim, radius: 5 });
+      primitives.push({ kind: 'rect', rect, fill: st.illegal, stroke: st.dim, radius: 6 });
     }
     const ink = b.legal ? st.btnText : st.dim;
     const avail = grid.btnW - 16;
@@ -861,12 +887,17 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const longest = lines.reduce((a, l) => (textWidth(l) > textWidth(a) ? l : a), '');
     const size = Math.max(10, Math.min(13, Math.floor(avail / Math.max(1, textWidth(longest)))));
     if (lines.length === 1) {
-      primitives.push(text(rect.x + 8, rect.y + 19, lines[0] ?? '', st, { size, color: ink }));
+      primitives.push(text(rect.x + 8, rect.y + 20, lines[0] ?? '', st, { size, color: ink }));
     } else {
-      primitives.push(text(rect.x + 8, rect.y + 12, lines[0] ?? '', st, { size, color: ink }));
-      primitives.push(text(rect.x + 8, rect.y + 25, lines[1] ?? '', st, { size, color: ink }));
+      primitives.push(text(rect.x + 8, rect.y + 13, lines[0] ?? '', st, { size, color: ink }));
+      primitives.push(text(rect.x + 8, rect.y + 26, lines[1] ?? '', st, { size, color: ink }));
     }
-    hits.push({ id: `btn:${String(i)}`, rect, intent: b.intent });
+    hits.push({
+      id: `btn:${String(i)}`,
+      rect: { x: rect.x - 5, y: rect.y - 6, w: rect.w + 10, h: rect.h + 12 },
+      visual: rect,
+      intent: b.intent,
+    });
   });
 
   // —— hosted 结算暂停：居中结算面板 ——
@@ -885,17 +916,28 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     const px = Math.floor(w / 2 - pw / 2);
     const py = Math.floor(h * 0.3 + (h * 0.42 - ph) / 2);
     primitives.push({ kind: 'rect', rect: { x: px, y: py, w: pw, h: ph }, fill: st.panel, stroke: st.legal, radius: 10 });
-    // 面板顶沿一道金线：联机结算面板与单机结算块同一套"金框"语言
+    // 喜庆化（M-UI3）：红内框（红金是"开奖"的配色语义，色值全来自令牌）+ 顶沿金线保留
+    primitives.push({ kind: 'rect', rect: { x: px + 4, y: py + 4, w: pw - 8, h: ph - 8 }, fill: 'transparent', stroke: withAlpha(st.cardRed, 0.55), radius: 8 });
     primitives.push({ kind: 'rect', rect: { x: px + 12, y: py + 5, w: pw - 24, h: 2 }, fill: withAlpha(st.accent, 0.6), stroke: null, radius: 1 });
     const visible = Math.max(1, Math.floor((ph - st.pad * 2) / lineH));
+    // 头衔舱：标题坐进一块金底深字的小胶囊（与行动钮同一套金），面板立刻有"奖状"的仪式感
+    primitives.push({ kind: 'rect', rect: { x: px + pw / 2 - 52, y: py + 6, w: 104, h: 20 }, fill: st.accent, stroke: shade(st.accent, -0.45), radius: 10 });
     lines.slice(0, visible).forEach((line, i) => {
       const isTitle = i === 0;
       const isHint = i === Math.min(lines.length, visible) - 1;
-      const color = isTitle ? st.accent : isHint ? (iAmHost ? st.legal : st.warn) : st.dim;
+      // 胜者行（含「赢」的结算行）金粗高亮 —— 喜庆面板里"谁赢了"必须是第一眼
+      const isWinner = !isTitle && !isHint && line.includes('赢 ');
+      const color = isTitle
+        ? st.btnText
+        : isWinner
+          ? shade(st.accent, -0.25)
+          : isHint
+            ? (iAmHost ? st.legal : st.warn)
+            : st.dim;
       primitives.push(
         text(px + pw / 2, py + st.pad * 1.5 + i * lineH + 6, line, st, {
-          size: isTitle ? 16 : 12,
-          bold: isTitle,
+          size: isTitle ? 13 : 12,
+          bold: isTitle || isWinner,
           color,
           align: 'center',
         }),
@@ -909,7 +951,7 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
     for (const hit of hits) {
       const r = hit.rect;
       if (hover.x >= r.x && hover.x <= r.x + r.w && hover.y >= r.y && hover.y <= r.y + r.h) {
-        primitives.push({ kind: 'rect', rect: r, fill: 'transparent', stroke: st.accent, radius: 5 });
+        primitives.push({ kind: 'rect', rect: hit.visual, fill: 'transparent', stroke: st.accent, radius: 6 });
         break;
       }
     }

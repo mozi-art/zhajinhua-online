@@ -7,7 +7,7 @@ import { test, note } from './harness.ts';
 import { stateHash } from '../src/engine/state.ts';
 import { EMPTY_UI, dispatch, drain, snapshot, start } from '../webui/bridge.ts';
 import type { Snapshot, StartOptions } from '../webui/bridge.ts';
-import { buildScene, chipStackCount, hitAt, INK_STYLE, PAPER_STYLE, statusBubbleInk, TABLE_STYLE } from '../webui/scene.ts';
+import { buildScene, chipStackCount, hitAt, IDLE_ANIM, INK_STYLE, PAPER_STYLE, statusBubbleInk, TABLE_STYLE } from '../webui/scene.ts';
 import type { Hit, Rect } from '../webui/scene.ts';
 import { paint } from '../webui/paint.ts';
 import { act, createSession, handText, intentOptions } from '../webmin/model.ts';
@@ -547,8 +547,11 @@ test('ui3/19b 极端候选数下只许二选一：要么明说装不下，要么
       assert.match(texts, /放不下|窗口太小/, `${String(w)}×${String(h)} 走提示路径却不说明原因`);
       continue;
     }
-    // 另一条腿：排得下，那就必须谁都不压谁
-    const all = [...sc.plates, ...sc.hits.map((hh) => hh.rect), ...(sc.strip === null ? [] : [sc.strip])];
+    // 另一条腿：排得下，那就必须谁都不压谁。
+    // M-UI3 口径改写（ID 保留）：命中区四周外扩过（触屏 44px），外扩的"好点"允许与底部条
+    // 擦碰 ≤7px（它不画出来）；互不重叠的硬约束改查**视觉钮**（hit.visual），命中区彼此
+    // 仍不许互相重叠（错点即误触）。
+    const all = [...sc.plates, ...sc.hits.map((hh) => hh.visual), ...(sc.strip === null ? [] : [sc.strip])];
     for (let i = 0; i < all.length; i += 1) {
       for (let j = i + 1; j < all.length; j += 1) {
         assert.ok(!intersects(all[i] as Rect, all[j] as Rect), `${String(w)}×${String(h)}：第 ${String(i)} 与第 ${String(j)} 块互相压住（装不下还硬排）`);
@@ -556,6 +559,11 @@ test('ui3/19b 极端候选数下只许二选一：要么明说装不下，要么
     }
     for (const p of sc.plates) {
       assert.ok(p.y >= TOP_BAR && p.y + p.h <= sc.height + 1, `座位板越界 @${String(w)}×${String(h)}`);
+    }
+    for (let i = 0; i < sc.hits.length; i += 1) {
+      for (let j = i + 1; j < sc.hits.length; j += 1) {
+        assert.ok(!intersects((sc.hits[i] as { rect: Rect }).rect, (sc.hits[j] as { rect: Rect }).rect), `${String(w)}×${String(h)}：命中区 ${String(i)} 与 ${String(j)} 重叠（错点即误触）`);
+      }
     }
   }
 });
@@ -909,7 +917,15 @@ test('ui3/34 hover 是纯入参：不传与现状逐字节相同；命中按钮�
   if (extra !== undefined && extra.kind === 'rect') {
     assert.equal(extra.fill, 'transparent', '高亮只描边不填充');
     assert.equal(extra.stroke, TABLE_STYLE.accent, '高亮用当前主题的 accent');
-    assert.deepEqual(extra.rect, hit.rect, '高亮必须 exactly 盖在命中按钮上');
+    // M-UI3 口径改写（ID 保留）：命中区四周外扩 6px 之后，高亮画在**视觉钮**（hit.visual）上，
+    // 不再是外扩 rect —— 外扩区只是"好点"，把 44px 的可点区整个描出来反而难看。意图未变：
+    // 高亮仍然 exactly 盖住用户看到并点到的那颗按钮。
+    assert.deepEqual(extra.rect, hit.visual, '高亮必须 exactly 盖在命中按钮的视觉钮上');
+    // visual 必须真在命中区内（外扩的意义就是"视觉钮周围也能点中"）
+    assert.ok(
+      hit.visual.x >= hit.rect.x && hit.visual.y >= hit.rect.y && hit.visual.x + hit.visual.w <= hit.rect.x + hit.rect.w + 1 && hit.visual.y + hit.visual.h <= hit.rect.y + hit.rect.h + 1,
+      `visual 必须落在命中区内：${JSON.stringify(hit.rect)} vs ${JSON.stringify(hit.visual)}`,
+    );
   }
   // 命中区 / 座位板 / 底部条一概不变：hover 只加一块高亮，不动任何布局
   assert.deepEqual(hovered.hits, base.hits);
@@ -923,7 +939,7 @@ test('ui3/34 hover 是纯入参：不传与现状逐字节相同；命中按钮�
   if (hit2 !== undefined) {
     const hovered2 = buildScene(s, 960, 620, TABLE_STYLE, undefined, { x: hit2.rect.x + 2, y: hit2.rect.y + 2 });
     const extra2 = hovered2.primitives[hovered2.primitives.length - 1];
-    assert.ok(extra2 !== undefined && extra2.kind === 'rect' && extra2.rect.x === hit2.rect.x && extra2.rect.y === hit2.rect.y, '高亮没有跟着第二颗按钮走');
+    assert.ok(extra2 !== undefined && extra2.kind === 'rect' && extra2.rect.x === hit2.visual.x && extra2.rect.y === hit2.visual.y, '高亮没有跟着第二颗按钮走（M-UI3 口径：画在 visual 上）');
   }
 });
 
@@ -1174,3 +1190,47 @@ test('ui3/41 状态气泡（M-UI2）：语义色映射表、气泡容身在座�
 function sc_plateAt(sc: ReturnType<typeof buildScene>, r: Rect): Rect | undefined {
   return sc.plates.find((p) => r.x >= p.x && r.y >= p.y && r.x + r.w <= p.x + p.w + 1 && r.y + r.h <= p.y + p.h + 1);
 }
+
+test('ui3/42 控件动效与命中区（M-UI3）：命中 44px 高、互不重叠、pulse 呼吸纯函数、赢家光环、面板喜庆化', () => {
+  const s = busyTable(8);
+  // ① 命中区：每颗 hit 高 = 32+12 = 44（触屏口径），visual 在 rect 内，hit 两两不重叠
+  const sc = buildScene(s, 960, 620, TABLE_STYLE);
+  for (const hit of sc.hits) {
+    assert.equal(hit.rect.h, 42, `命中区高必须 42px（30 视觉 + 12 外扩），实得 ${String(hit.rect.h)}`);
+    assert.ok(hit.rect.w >= 96, `命中区宽 ≥96，实得 ${String(hit.rect.w)}`);
+    assert.ok(hit.visual.x >= hit.rect.x && hit.visual.y >= hit.rect.y && hit.visual.x + hit.visual.w <= hit.rect.x + hit.rect.w + 1 && hit.visual.y + hit.visual.h <= hit.rect.y + hit.rect.h + 1, 'visual 在 rect 内');
+  }
+  for (let i = 0; i < sc.hits.length; i += 1) {
+    for (let j = i + 1; j < sc.hits.length; j += 1) {
+      const a = (sc.hits[i] as { rect: Rect }).rect;
+      const c = (sc.hits[j] as { rect: Rect }).rect;
+      assert.ok(!intersects(a, c), `命中区两两不重叠：${String(i)} vs ${String(j)}`);
+    }
+  }
+  // ② pulse 纯函数：无 pulse 与有 pulse 输出不同（呼吸在画）；同一 now 两次逐字节相同（确定性）
+  const idle = buildScene(s, 960, 620, TABLE_STYLE, IDLE_ANIM);
+  const on = buildScene(s, 960, 620, TABLE_STYLE, { ...IDLE_ANIM, now: 5000, pulse: true });
+  assert.notEqual(JSON.stringify(on), JSON.stringify(idle), 'pulse 开着必须真的多画/改画呼吸层');
+  assert.equal(JSON.stringify(on), JSON.stringify(buildScene(s, 960, 620, TABLE_STYLE, { ...IDLE_ANIM, now: 5000, pulse: true })), '同一 now 两次逐字节相同');
+  assert.notEqual(JSON.stringify(on), JSON.stringify(buildScene(s, 960, 620, TABLE_STYLE, { ...IDLE_ANIM, now: 5140, pulse: true })), 'now 前进呼吸必须起伏（不是恒定装饰）');
+  // ③ 赢家光环：构造结算快照（胜利者 resultText 赢 N）—— pulse 下光环呼吸、无 pulse 时静态
+  const winSnap = busyTable(2);
+  winSnap.seats.forEach((x, i) => { x.resultText = i === 0 ? '赢 8' : '没赢'; });
+  const glowOn = buildScene(winSnap, 960, 620, TABLE_STYLE, { ...IDLE_ANIM, now: 5000, pulse: true });
+  // 光环描边是 withAlpha(accent) 的 rgba 串 ⇒ 从令牌现算 rgb 前缀来认它（不硬编码色值）
+  const goldRgb = TABLE_STYLE.accent.replace('#', '').match(/../g)?.map((h) => String(parseInt(h, 16))).join(',') ?? '';
+  const haloStrokes = glowOn.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === 'transparent' && p.stroke !== null && p.stroke.includes(goldRgb) && p.rect.w > 300);
+  assert.ok(haloStrokes.length >= 1, `赢家座位板要有光环描边（认 ${goldRgb} 前缀）`);
+  // ④ hostPaused 喜庆化：红内框 + 金头衔舱 + 胜者行金粗，且 ui3/26 的面板口径（panel+legal 恰一块）不破
+  const pauseSnap: Snapshot = { ...s, phase: 'settled', hostPaused: true, buttons: [{ intent: { kind: 'begin' }, text: '继续下一局', cost: null, legal: true }], settlement: ['结束原因：稳定终局', '甲[你]｜2S 4S 6S 单张｜赢 2（现筹码 300）', '乙[玩家]｜3H 5H 7H 单张｜没赢（现筹码 298）'] };
+  const p1 = buildScene(pauseSnap, 960, 620, TABLE_STYLE);
+  const panels = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.panel && p.stroke === TABLE_STYLE.legal);
+  assert.equal(panels.length, 1, '喜庆化不许破坏 ui3/26 的"恰一块面板"口径');
+  const reds = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.stroke !== null && typeof p.stroke === 'string' && p.stroke.startsWith('rgba(') && p.fill === 'transparent' && p.rect.h > 40);
+  assert.ok(reds.length >= 1, '面板要有红内框（喜庆配色）');
+  const goldCaps = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.accent && p.rect.h === 20);
+  assert.equal(goldCaps.length, 1, '标题要坐进金底头衔舱');
+  const winnerTexts = p1.primitives.filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text' && p.text.includes('赢 2'));
+  assert.ok(winnerTexts.length === 1 && winnerTexts[0]?.bold === true, '胜者行要金粗高亮');
+  note('ui3/42 命中 44/不重叠/visual 内含 + pulse 纯函数（同 now 逐字节同、now 前进起伏）+ 赢家光环 + 面板喜庆化不破 ui3/26');
+});

@@ -401,6 +401,9 @@ function render(): void {
       now,
       since: flipSince,
       duration: FLIP_MS,
+      // 呼吸动效开关（M-UI3）：只要桌上有"轮到你了/可准备/可继续"这类可点的主行动钮就点亮，
+      // 让金钮与赢家光效活起来。纯入参：scene 侧按 now 正弦，不引入任何时钟状态。
+      ...(snap.buttons.some((b) => b.legal) ? { pulse: true } : {}),
       ...(dealing ? { deal: { start: dealStart, duration: DEAL_FLIGHT, stagger: DEAL_STAGGER } } : {}),
       ...(chipFlying && chipAnim !== null ? { chips: chipAnim } : {}),
     },
