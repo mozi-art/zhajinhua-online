@@ -54,6 +54,9 @@ export type Style = {
   cardFace: string;
   cardBack: string;
   cardRed: string;
+  // 状态气泡底色（M-UI2）：白底彩字的" bubble "。刻意不是 cardFace —— ui3/18/23 按卡片底色
+  // 收集牌面矩形，气泡若同色会被当成一张小牌卷进几何断言。三主题同构（ui3/35）。
+  bubble: string;
   font: string;
   pad: number;
   rowH: number;
@@ -83,6 +86,7 @@ export const TABLE_STYLE: Style = {
   cardFace: '#fffdf4',
   cardBack: '#1f5fa8',
   cardRed: '#c62828',
+  bubble: '#f6f4ea',
   font: CARD_FONT,
   pad: 14,
   rowH: 18,
@@ -107,6 +111,7 @@ export const INK_STYLE: Style = {
   cardFace: '#f4efe4',
   cardBack: '#31415f',
   cardRed: '#c04a35',
+  bubble: '#efe9dc',
   font: TABLE_STYLE.font,
   pad: 14,
   rowH: 18,
@@ -130,6 +135,7 @@ export const PAPER_STYLE: Style = {
   cardFace: '#fffdf6',
   cardBack: '#8a94a8',
   cardRed: '#b8432f',
+  bubble: '#fffdf6',
   font: TABLE_STYLE.font,
   pad: 14,
   rowH: 18,
@@ -171,6 +177,7 @@ function easeOutCubic(t: number): number {
 
 const PAD = 8; // 座位板内边距
 const AVATAR = 44; // 头像圆环直径（程序化：首字母 + 金圈双环，无外部素材）—— 斗地主式大头像
+const MINI_AVATAR = 26; // 对手板迷你头像圈（M-UI2）：顶带（TOP_TEXT=34）之内放得下的身份感
 const OWN_LABELS = 168; // 本人板：说明文字占左侧一栏，牌放右边（省下的竖向高度是 6 人桌的救命钱）
 const TOP_TEXT = 34; // 对手板：两行说明占顶部这条带，牌从这条带下面开始
 const CAPTION = 12; // 对手板：牌下面那行（牌型 / ···）
@@ -211,6 +218,26 @@ export function chipStackCount(committed: number, stake: number): number {
   return Math.max(1, Math.min(CHIP.max, Math.round(committed / stake)));
 }
 
+// —— 状态气泡（M-UI2，天天斗地主式的"白底彩字小胶囊"）——
+// 语义色映射是唯一出口：board 上的每一处气泡（本人板/对手板）都从这取字色，不各写一份。
+// 色值全是主题令牌的加深档（白底上要深字才读得清；shade(-x) 派生 ⇒ 不引入新调色板）。
+// 导出给 ui3/40 直接钉映射表。
+export function statusBubbleInk(status: string, isTurn: boolean, st: Style): string {
+  if (isTurn || status.includes('行动中')) return shade(st.accent, -0.5);
+  if (status.includes('已准备')) return shade(st.legal, -0.4);
+  if (status.includes('弃牌') || status.includes('被淘汰') || status.includes('不参与') || status.includes('离桌')) {
+    return shade(st.dim, -0.3);
+  }
+  if (status.includes('未准备')) return shade(st.warn, -0.15);
+  return shade(st.fg, -0.6); // 局中/未知：中性深字
+}
+
+// 气泡尺寸：宽度按字宽估（保守），容器超宽就吃满容器；落位（左对齐/右对齐）归调用点。
+export function statusBubbleSize(status: string, maxW: number): { w: number; h: number } {
+  const w = Math.min(maxW, Math.max(30, textWidth(status) * 10 + 12));
+  return { w, h: 15 };
+}
+
 function text(x: number, y: number, t: string, st: Style, opt?: { size?: number; color?: string; bold?: boolean; align?: 'left' | 'center' | 'right' }): Primitive {
   return {
     kind: 'text',
@@ -235,6 +262,15 @@ function textWidth(t: string): number {
 function fitSize(t: string, avail: number, max: number): number {
   const units = Math.max(1, textWidth(t));
   return Math.max(10, Math.min(max, Math.floor(avail / units)));
+}
+
+// 单行截断：字号压到下限仍放不下时，掐掉尾部补省略号 —— 名牌宁可少一个字也不许爬进
+// 状态气泡/金牌的领地（M-UI2 真机实测：fitSize 的下限 10 保不住"对手板长名 + 气泡"这对组合）。
+function ellipsize(t: string, room: number, size: number): string {
+  if (textWidth(t) * size <= room) return t;
+  let cut = t.length;
+  while (cut > 1 && textWidth(`${t.slice(0, cut)}…`) * size > room) cut -= 1;
+  return `${t.slice(0, cut).trimEnd()}…`;
 }
 
 // 一行放不下就折成两行（只在空格处断，断不出两行时按字宽对半）。
@@ -597,14 +633,19 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
 
     const cardX = own ? box.x + OWN_LABELS : box.x + PAD;
     const cardY = own ? box.y + PAD : box.y + TOP_TEXT;
-    const labelX = own ? box.x + PAD + AVATAR + 6 : box.x + PAD;
+    // M-UI2：对手板也有迷你头像圈（26px，顶带内），文字从圈右侧起笔 —— 对手也该有"座位头像"的身份感。
+    const labelX = own ? box.x + PAD + AVATAR + 6 : box.x + PAD + MINI_AVATAR + 6;
     // role 三档：human=本标签页的我、bot=单机占位机器人、remote=联机桌上别的真人。
     // 联机桌上把别人标成 bot 会印出"[电脑]"，那是错的（M5 加的就是这一档）。
     const who = seat.role === 'human' ? '[你]' : seat.role === 'bot' ? '[电脑]' : '[玩家]';
     const head = `${seat.marks}${seat.name}${who} ${seat.departed ? '离桌' : seat.looked ? '明' : '闷'}`;
+    // 状态气泡（M-UI2）：对手板占右上角（与庄家金牌同排，金牌在更右），本人板占说明栏第三行。
+    // 气泡宽度先从文字栏里扣掉 ⇒ 名牌/筹码行与气泡永不叠字（与庄家金牌同一套"先扣宽度"纪律）。
+    const bubble = seat.status === '' ? null : statusBubbleSize(seat.status, own ? OWN_LABELS - AVATAR - 14 : box.w - MINI_AVATAR - 16);
+    const bubbleRoom = bubble !== null && !own ? bubble.w + 5 : 0;
     // 庄家金牌占右上角：先把它的宽度从文字栏里扣掉，名牌与金牌永不叠字
     const dealerRoom = isDealer ? 22 : 0;
-    const labelRoom = (own ? OWN_LABELS - AVATAR - 6 : box.w) - PAD * 2 - 4 - dealerRoom;
+    const labelRoom = (own ? OWN_LABELS - AVATAR - 6 : box.w - MINI_AVATAR - 6) - PAD * 2 - 4 - dealerRoom - bubbleRoom;
     // 头像圆环只上本人板（对手板 124 宽是 6 人桌窄视口的活口，对手的身份感来自角位与名牌）。
     // 金圈 + 深底 + 大首字，读起来就是斗地主的"座位头像"；轮次时整圈点亮。
     // 首字母用 accent 色：ui3/24 以"居中+前景色"圈出亮牌行，头像字必须避开这条判定；
@@ -617,18 +658,42 @@ export function buildScene(snap: Snapshot, width: number, height: number, st: St
       primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2, ry: AVATAR / 2, fill: shade(st.panelSoft, 0.12), stroke: isTurn ? st.accent : withAlpha(st.accent, 0.72) });
       primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: AVATAR / 2 - 3, ry: AVATAR / 2 - 3, fill: 'transparent', stroke: withAlpha(shade(st.panelSoft, 0.4), 0.5) });
       primitives.push(text(avCx, avCy + 6, glyph, st, { size: 18, bold: true, color: st.accent, align: 'center' }));
+    } else {
+      // 对手板迷你头像圈（M-UI2）：26px 金圈 + 首字，几何完全在顶带（TOP_TEXT=34）之内
+      const avCx = box.x + PAD + MINI_AVATAR / 2;
+      const avCy = box.y + 4 + MINI_AVATAR / 2;
+      const initial = seat.name.slice(0, 1);
+      const glyph = /^[2-9TJQKA♠♥♣♦]$/.test(initial) ? '#' : initial;
+      primitives.push({ kind: 'ellipse', cx: avCx, cy: avCy, rx: MINI_AVATAR / 2, ry: MINI_AVATAR / 2, fill: shade(st.panelSoft, 0.12), stroke: isTurn ? st.accent : withAlpha(st.accent, 0.6) });
+      primitives.push(text(avCx, avCy + 4, glyph, st, { size: 11, bold: true, color: st.accent, align: 'center' }));
     }
+    // 信息胶囊（M-UI2）：名字/筹码两行垫一块深色圆角底 —— 裸文字变"名牌胶囊"（斗地主的座位信息条）。
+    // 画在文字之前 ⇒ 文字永远在胶囊上层；填充从 panel 派生 ⇒ 不碰任何按填充色收集的断言。
+    const capW = own ? OWN_LABELS - AVATAR - 4 : Math.min(box.w - MINI_AVATAR - 10, labelRoom + bubbleRoom + dealerRoom + 8);
+    primitives.push({ kind: 'rect', rect: { x: labelX - 4, y: box.y + (own ? 5 : 4), w: capW, h: own ? 36 : 30 }, fill: withAlpha(shade(st.panel, -0.35), 0.62), stroke: null, radius: 7 });
     // 庄家金牌：金底深字的圆角小牌，位置在本人说明栏 / 对手板右上角（都避开牌面）
     if (isDealer) {
       const dw = 22;
       const dx = (own ? box.x + OWN_LABELS - 4 : box.x + box.w - 6) - dw;
-      primitives.push({ kind: 'rect', rect: { x: dx, y: box.y + 5, w: dw, h: 15 }, fill: st.accent, stroke: shade(st.accent, -0.4), radius: 7 });
-      primitives.push(text(dx + dw / 2, box.y + 16, '庄', st, { size: 10, bold: true, color: st.btnText, align: 'center' }));
+      primitives.push({ kind: 'rect', rect: { x: dx, y: box.y + 2, w: dw, h: 15 }, fill: st.accent, stroke: shade(st.accent, -0.4), radius: 7 });
+      primitives.push(text(dx + dw / 2, box.y + 13, '庄', st, { size: 10, bold: true, color: st.btnText, align: 'center' }));
     }
-    primitives.push(text(labelX, box.y + (own ? 16 : 14), head, st, { size: fitSize(head, labelRoom, own ? 15 : 13), bold: true, color: seat.departed ? st.dim : st.fg }));
+    // 对手板状态气泡：右上角、金牌左侧（两者都占顶带，互不叠字）
+    if (!own && bubble !== null) {
+      const bx = box.x + box.w - 6 - dealerRoom - bubble.w;
+      primitives.push({ kind: 'rect', rect: { x: bx, y: box.y + 2, w: bubble.w, h: bubble.h }, fill: st.bubble, stroke: withAlpha(st.dim, 0.45), radius: 7 });
+      primitives.push(text(bx + bubble.w / 2, box.y + 13, seat.status, st, { size: 10, bold: true, color: statusBubbleInk(seat.status, isTurn, st), align: 'center' }));
+    }
+    const headSize = fitSize(head, labelRoom, own ? 15 : 13);
+    primitives.push(text(labelX, box.y + (own ? 16 : 14), ellipsize(head, labelRoom, headSize), st, { size: headSize, bold: true, color: seat.departed ? st.dim : st.fg }));
     const chipsLine = `筹码 ${String(seat.chips)} · 投入 ${String(seat.committed)}`;
     primitives.push(text(labelX, box.y + (own ? 34 : 28), chipsLine, st, { size: fitSize(chipsLine, labelRoom, own ? 13 : 11), color: st.dim }));
-    if (own) primitives.push(text(labelX, box.y + 52, seat.status, st, { size: fitSize(seat.status, labelRoom, 13), color: st.dim }));
+    // 本人板状态气泡（M-UI2）：替代原先那行裸文本 —— 白底彩字，语义色由 statusBubbleInk 统一出口给。
+    if (own && bubble !== null) {
+      const bw = Math.min(bubble.w, labelRoom);
+      primitives.push({ kind: 'rect', rect: { x: labelX - 2, y: box.y + 42, w: bw, h: 16 }, fill: st.bubble, stroke: withAlpha(st.dim, 0.45), radius: 8 });
+      primitives.push(text(labelX - 2 + bw / 2, box.y + 53, seat.status, st, { size: 11, bold: true, color: statusBubbleInk(seat.status, isTurn, st), align: 'center' }));
+    }
 
     // 三张牌位：翻牌进度 < 0.5 时只许画牌背，绝不提前露牌面。
     // 发牌飞行（anim.deal）：次序 = 环座位逐张（slot*1/轮 k*n+slot），从桌面中心（牌堆位）

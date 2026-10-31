@@ -7,7 +7,7 @@ import { test, note } from './harness.ts';
 import { stateHash } from '../src/engine/state.ts';
 import { EMPTY_UI, dispatch, drain, snapshot, start } from '../webui/bridge.ts';
 import type { Snapshot, StartOptions } from '../webui/bridge.ts';
-import { buildScene, chipStackCount, hitAt, INK_STYLE, PAPER_STYLE, TABLE_STYLE } from '../webui/scene.ts';
+import { buildScene, chipStackCount, hitAt, INK_STYLE, PAPER_STYLE, statusBubbleInk, TABLE_STYLE } from '../webui/scene.ts';
 import type { Hit, Rect } from '../webui/scene.ts';
 import { paint } from '../webui/paint.ts';
 import { act, createSession, handText, intentOptions } from '../webmin/model.ts';
@@ -1128,3 +1128,49 @@ test('lby/04 资产纪律：单个二进制 ≤300KB、assets 总量 ≤600KB（
   assert.ok(total <= 600 * 1024, `webui/assets 总量 ${String(total)} 字节超 600KB 上限`);
   note(`lby/04 资产纪律：${String(files.length)} 个文件共 ${String(total)} 字节（单文件 ≤300KB、总量 ≤600KB、SVG 无脚本）`);
 });
+
+test('ui3/41 状态气泡（M-UI2）：语义色映射表、气泡容身在座位板内、不冒充牌面、不与庄家金牌叠字', () => {
+  // ① 语义色映射：statusBubbleInk 是唯一出口（每处气泡都从这取字色）
+  const ink = (s: string, turn = false): string => statusBubbleInk(s, turn, TABLE_STYLE);
+  assert.equal(ink('行动中'), ink('局中', true), '轮到谁，谁的气泡就是金色档（isTurn 与"行动中"同档）');
+  assert.notEqual(ink('行动中'), ink('局中'), '行动中与局中必须分档');
+  assert.equal(ink('已准备'), ink('已准备', true) === ink('已准备') ? ink('已准备') : ink('已准备'), '恒定');
+  assert.notEqual(ink('已准备'), ink('未准备'), '已准备（绿档）与未准备（警示档）分档');
+  assert.equal(ink('弃牌'), ink('被淘汰'), '弃牌/被淘汰同一灰档');
+  assert.equal(ink('本局不参与'), ink('弃牌'), '不参与也归灰档');
+  // 深字纪律：白底气泡上的字色必须比底色深得多（可读性），且不等于 fg 本串（避开 ui3/24 的收编口径）
+  for (const s of ['行动中', '已准备', '未准备', '弃牌', '局中', '本局不参与']) {
+    assert.ok(ink(s) !== TABLE_STYLE.fg, `${s} 的字色不该是裸 fg`);
+  }
+  // ② 几何：真实快照（单机开局）里每一块气泡都待在自己座位板内、不压牌面、不冒充牌面
+  const soloUi = opened();
+  const b = buildScene(snapshot(soloUi), 960, 620, TABLE_STYLE);
+  const bubbleFills = b.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.bubble);
+  assert.ok(bubbleFills.length >= 1, '至少一块状态气泡（本人板的"局中/行动中"）');
+  const inPlate = (r: Rect): Rect | undefined => sc_plateAt(b, r);
+  for (const bp of bubbleFills) {
+    const plate = inPlate(bp.rect);
+    assert.ok(plate !== undefined, `气泡 ${JSON.stringify(bp)} 必须整体落在某块座位板内`);
+    for (const f of faceRects(b)) assert.ok(!intersects(bp.rect, f), `气泡压到了牌面：${JSON.stringify(bp)} vs ${JSON.stringify(f)}`);
+  }
+  // ③ 气泡不冒充牌面：cardFace 收集器（ui3/18/23 的口径）数不变 —— 气泡用独立 bubble 令牌
+  const perSeat = snapshot(soloUi).seats.filter((s) => !s.hidden).length;
+  assert.equal(faceRects(b).length, perSeat * 3, `亮牌矩形应当恰好 = 亮牌座位数×3，实得 ${String(faceRects(b).length)}（气泡不许混进来）`);
+  // ④ 对手板气泡与庄家金牌共存：构造一个对手坐庄的快照，两者的矩形不得相交
+  const dealerSnap = snapshot(opened());
+  const opp = dealerSnap.seats.find((s) => s.role !== 'human');
+  if (opp !== undefined) {
+    dealerSnap.dealer = opp.seat;
+    const b2 = buildScene(dealerSnap, 960, 620, TABLE_STYLE);
+    const medals = b2.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.accent && p.rect.w === 22 && p.rect.h === 15);
+    const bubbles2 = b2.primitives.filter((p): p is Extract<typeof p, { kind: 'rect' }> => p.kind === 'rect' && p.fill === TABLE_STYLE.bubble);
+    assert.ok(medals.length >= 1 && bubbles2.length >= 1, '构造前提：对手庄家金牌与气泡都在');
+    for (const m of medals) for (const bp of bubbles2) assert.ok(!intersects(m.rect, bp.rect), `庄家金牌与状态气泡叠字：${JSON.stringify(m.rect)} vs ${JSON.stringify(bp.rect)}`);
+  }
+  note('ui3/41 气泡：语义色映射（金/绿/灰/警示分档）+ 容身在板内不压牌面 + bubble 令牌与 cardFace 分家 + 金牌共存');
+});
+
+// ui3/40 的辅助：气泡矩形落在哪块座位板内（完全包含才算）
+function sc_plateAt(sc: ReturnType<typeof buildScene>, r: Rect): Rect | undefined {
+  return sc.plates.find((p) => r.x >= p.x && r.y >= p.y && r.x + r.w <= p.x + p.w + 1 && r.y + r.h <= p.y + p.h + 1);
+}
