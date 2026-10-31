@@ -77,7 +77,7 @@ Windows 上首次 `--host 0.0.0.0` 会弹防火墙放行确认，允许即可。
 ## 怎么自己复核（不用信我说的话）
 
 ```bash
-npm test            # 457 例 / 31 个测试文件；连跑两次输出逐字节相同（固定种子、禁时间戳）
+npm test            # 460 例 / 31 个测试文件；连跑两次输出逐字节相同（固定种子、禁时间戳）
 npx tsc --noEmit    # strict + erasableSyntaxOnly + noUncheckedIndexedAccess，零诊断
 ```
 
@@ -108,7 +108,7 @@ netx/        联机层（服务端权威 + 可移植客户端）
 webmin/      单机版（M1.5）：零依赖静态服务 + DOM 页面（含 /lobby 短链映射）
 webui/       正式 UI（Vite + Canvas）：bridge / scene / paint / main + netplay（联机）
              + lobby.html / lobby.ts（M6 大厅：开桌摇码 / 房间列表 / 手输码进入）
-test/        31 个测试文件、457 例，含 1000 局 fuzz 与静态机检
+test/        31 个测试文件、460 例，含 1000 局 fuzz 与静态机检
 evidence/    真机验收留证
 ```
 
